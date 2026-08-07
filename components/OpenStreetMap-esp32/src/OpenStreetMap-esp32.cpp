@@ -1,0 +1,713 @@
+/*
+    Copyright (c) 2025 Cellie https://github.com/CelliesProjects/OpenStreetMap-esp32
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+    SPDX-License-Identifier: MIT
+    */
+
+#include "OpenStreetMap-esp32.hpp"
+
+#include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "tjpgd.h"
+
+namespace
+{
+    /* Offline tile source: prefer /sdcard/<z>/<x>/<y>.png, then .jpg. The card
+     * is mounted by src/sd_card.c via esp_vfs_fat_sdmmc_mount at /sdcard. A
+     * mutex serialises reads because the tile-worker tasks run on both cores
+     * and FATFS volumes are not safe for concurrent fread. */
+    SemaphoreHandle_t s_sdMutex = nullptr;
+
+    MemoryBuffer loadTileFromSD(uint32_t x, uint32_t y, uint8_t zoom)
+    {
+        if (!s_sdMutex)
+            s_sdMutex = xSemaphoreCreateMutex();
+        if (!s_sdMutex)
+            return MemoryBuffer::empty();
+
+        MemoryBuffer buffer = MemoryBuffer::empty();
+        if (xSemaphoreTake(s_sdMutex, portMAX_DELAY) == pdTRUE)
+        {
+            static const char *exts[] = {"png", "jpg"};
+            for (int i = 0; i < 2 && !buffer.isAllocated(); ++i)
+            {
+                char path[64];
+                snprintf(path, sizeof(path), "/sdcard/%u/%lu/%lu.%s",
+                         zoom, (unsigned long)x, (unsigned long)y, exts[i]);
+                FILE *f = fopen(path, "rb");
+                if (f)
+                {
+                    fseek(f, 0, SEEK_END);
+                    long sz = ftell(f);
+                    fseek(f, 0, SEEK_SET);
+                    if (sz > 0 && sz <= (1024 * 1024))
+                    {
+                        buffer = MemoryBuffer((size_t)sz);
+                        if (buffer.isAllocated() &&
+                            fread(buffer.get(), 1, (size_t)sz, f) != (size_t)sz)
+                            buffer = MemoryBuffer::empty();
+                    }
+                    fclose(f);
+                }
+            }
+            xSemaphoreGive(s_sdMutex);
+        }
+        return buffer;
+    }
+
+    /* --- JPEG support via TJpgDec (software; the S3 has no HW codec) --- */
+    typedef struct
+    {
+        const uint8_t *ptr;
+        size_t size;
+        size_t pos;
+    } jpg_mem_t;
+
+    static SemaphoreHandle_t s_jpgMutex = nullptr;
+    static void *s_jpgWork = nullptr; /* TJPGD_WORKSPACE_SIZE pool, alloc once */
+    static uint16_t *s_jpgOut = nullptr;
+    static uint16_t s_jpgOutW = 0;
+
+    static size_t jpg_mem_in(JDEC *jd, uint8_t *buf, size_t ndata)
+    {
+        jpg_mem_t *src = (jpg_mem_t *)jd->device;
+        if (ndata > src->size - src->pos)
+            ndata = src->size - src->pos;
+        if (ndata)
+        {
+            memcpy(buf, src->ptr + src->pos, ndata);
+            src->pos += ndata;
+        }
+        return ndata;
+    }
+
+    static int jpg_mem_out(JDEC *jd, void *bitmap, JRECT *rect)
+    {
+        const uint16_t w = rect->right - rect->left + 1;
+        const uint16_t *src = (const uint16_t *)bitmap;
+        for (uint16_t y = rect->top; y <= rect->bottom; ++y)
+        {
+            memcpy(&s_jpgOut[(size_t)y * s_jpgOutW + rect->left], src, w * 2);
+            src += w;
+        }
+        return 1; /* continue */
+    }
+
+    bool isJPEG(MemoryBuffer &buf)
+    {
+        return buf.size() >= 3 && buf.get()[0] == 0xFF && buf.get()[1] == 0xD8;
+    }
+
+    /* Decode a JPEG into an RGB565 (big-endian) tile buffer. */
+    bool decodeJPEGtoBuffer(MemoryBuffer &buf, uint16_t *out,
+                            uint32_t tileSize, String &result)
+    {
+        if (!s_jpgMutex)
+            s_jpgMutex = xSemaphoreCreateMutex();
+        if (!s_jpgWork)
+            s_jpgWork = heap_caps_malloc(TJPGD_WORKSPACE_SIZE, MALLOC_CAP_SPIRAM);
+        if (!s_jpgMutex || !s_jpgWork)
+        {
+            result = "jpeg alloc failed";
+            return false;
+        }
+        if (xSemaphoreTake(s_jpgMutex, portMAX_DELAY) != pdTRUE)
+            return false;
+
+        jpg_mem_t src = {buf.get(), buf.size(), 0};
+        JDEC jd;
+        JRESULT rc = jd_prepare(&jd, jpg_mem_in, s_jpgWork, TJPGD_WORKSPACE_SIZE, &src);
+        if (rc == JDR_OK)
+        {
+            jd.swap = 1; /* big-endian RGB565, matches LGFX sprite */
+            s_jpgOut = out;
+            s_jpgOutW = (uint16_t)tileSize;
+            rc = jd_decomp(&jd, jpg_mem_out, 0);
+        }
+        xSemaphoreGive(s_jpgMutex);
+
+        if (rc != JDR_OK)
+        {
+            result = "jpeg decode err " + String((int)rc);
+            return false;
+        }
+        return true;
+    }
+} // namespace
+
+OpenStreetMap::~OpenStreetMap()
+{
+    if (jobQueue && tasksStarted)
+    {
+        constexpr TileJob poison = {0, 0, 255, nullptr};
+        for (int i = 0; i < numberOfWorkers; ++i)
+            if (xQueueSend(jobQueue, &poison, portMAX_DELAY) != pdPASS)
+                log_e("Failed to send poison pill to tile worker %d", i);
+
+        for (int i = 0; i < numberOfWorkers; ++i)
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        ownerTask = nullptr;
+        tasksStarted = false;
+        numberOfWorkers = 0;
+
+        vQueueDelete(jobQueue);
+        jobQueue = nullptr;
+    }
+
+    freeTilesCache();
+
+    if (pngCore0)
+    {
+        pngCore0->~PNG();
+        heap_caps_free(pngCore0);
+        pngCore0 = nullptr;
+    }
+    if (pngCore1)
+    {
+        pngCore1->~PNG();
+        heap_caps_free(pngCore1);
+        pngCore1 = nullptr;
+    }
+}
+
+void OpenStreetMap::setSize(uint16_t w, uint16_t h)
+{
+    mapWidth = w;
+    mapHeight = h;
+}
+
+double OpenStreetMap::lon2tile(double lon, uint8_t zoom)
+{
+    return (lon + 180.0) / 360.0 * (1 << zoom);
+}
+
+double OpenStreetMap::lat2tile(double lat, uint8_t zoom)
+{
+    double latRad = lat * M_PI / 180.0;
+    return (1.0 - log(tan(latRad) + 1.0 / cos(latRad)) / M_PI) / 2.0 * (1 << zoom);
+}
+
+void OpenStreetMap::computeRequiredTiles(double longitude, double latitude, uint8_t zoom, tileList &requiredTiles)
+{
+    // Compute exact tile coordinates
+    const double exactTileX = lon2tile(longitude, zoom);
+    const double exactTileY = lat2tile(latitude, zoom);
+
+    // Determine the integer tile indices
+    const int32_t targetTileX = static_cast<int32_t>(exactTileX);
+    const int32_t targetTileY = static_cast<int32_t>(exactTileY);
+
+    // Compute the offset inside the tile for the given coordinates
+    const int16_t targetOffsetX = (exactTileX - targetTileX) * currentProvider->tileSize;
+    const int16_t targetOffsetY = (exactTileY - targetTileY) * currentProvider->tileSize;
+
+    // Compute the offset for tiles covering the map area to keep the location centered
+    const int16_t tilesOffsetX = mapWidth / 2 - targetOffsetX;
+    const int16_t tilesOffsetY = mapHeight / 2 - targetOffsetY;
+
+    // Compute number of colums required
+    const float colsLeft = 1.0 * tilesOffsetX / currentProvider->tileSize;
+    const float colsRight = float(mapWidth - (tilesOffsetX + currentProvider->tileSize)) / currentProvider->tileSize;
+    numberOfColums = ceil(colsLeft) + 1 + ceil(colsRight);
+
+    startOffsetX = tilesOffsetX - (ceil(colsLeft) * currentProvider->tileSize);
+
+    // Compute number of rows required
+    const float rowsTop = 1.0 * tilesOffsetY / currentProvider->tileSize;
+    const float rowsBottom = float(mapHeight - (tilesOffsetY + currentProvider->tileSize)) / currentProvider->tileSize;
+    const uint32_t numberOfRows = ceil(rowsTop) + 1 + ceil(rowsBottom);
+
+    startOffsetY = tilesOffsetY - (ceil(rowsTop) * currentProvider->tileSize);
+
+    log_v(" Need %i * %i tiles. First tile offset is %d,%d",
+          numberOfColums, numberOfRows, startOffsetX, startOffsetY);
+
+    startTileIndexX = targetTileX - ceil(colsLeft);
+    startTileIndexY = targetTileY - ceil(rowsTop);
+
+    log_v("top left tile indices: %d, %d", startTileIndexX, startTileIndexY);
+
+    const int32_t worldTileWidth = 1 << zoom;
+    for (int32_t y = 0; y < numberOfRows; ++y)
+    {
+        for (int32_t x = 0; x < numberOfColums; ++x)
+        {
+            int32_t tileX = startTileIndexX + x;
+            const int32_t tileY = startTileIndexY + y;
+
+            // Apply modulo wrapping for tileX
+            // see https://godbolt.org/z/96e1x7j7r
+            tileX = (tileX % worldTileWidth + worldTileWidth) % worldTileWidth;
+            requiredTiles.emplace_back(tileX, tileY);
+        }
+    }
+}
+
+CachedTile *OpenStreetMap::findUnusedTile(const tileList &requiredTiles, uint8_t zoom)
+{
+    for (auto &tile : tilesCache)
+    {
+        if (tile.busy)
+            continue;
+
+        // If a tile is valid but not required in the current frame, we can replace it
+        bool needed = false;
+        for (const auto &[x, y] : requiredTiles)
+        {
+            if (tile.x == x && tile.y == y && tile.z == zoom && tile.valid)
+            {
+                needed = true;
+                break;
+            }
+        }
+        if (!needed)
+        {
+            tile.busy = true;
+            return &tile;
+        }
+    }
+
+    return nullptr; // no unused tile found
+}
+
+CachedTile *OpenStreetMap::isTileCached(uint32_t x, uint32_t y, uint8_t z)
+{
+    for (auto &tile : tilesCache)
+    {
+        if (tile.x == x && tile.y == y && tile.z == z && tile.valid)
+            return &tile;
+    }
+    return nullptr;
+}
+
+void OpenStreetMap::freeTilesCache()
+{
+    std::vector<CachedTile>().swap(tilesCache);
+}
+
+bool OpenStreetMap::resizeTilesCache(uint16_t numberOfTiles)
+{
+    if (!numberOfTiles)
+    {
+        log_e("Invalid cache size: %d", numberOfTiles);
+        return false;
+    }
+
+    freeTilesCache();
+    tilesCache.resize(numberOfTiles);
+
+    for (auto &tile : tilesCache)
+    {
+        if (!tile.allocate(currentProvider->tileSize))
+        {
+            log_e("Tile cache allocation failed!");
+            freeTilesCache();
+            return false;
+        }
+    }
+    return true;
+}
+
+void OpenStreetMap::updateCache(const tileList &requiredTiles, uint8_t zoom, TileBufferList &tilePointers)
+{
+    [[maybe_unused]] const unsigned long startMS = millis();
+    std::vector<TileJob> jobs;
+    makeJobList(requiredTiles, jobs, zoom, tilePointers);
+    if (!jobs.empty())
+    {
+        runJobs(jobs);
+        log_i("Finished %i jobs in %lu ms - %i ms/job", jobs.size(), millis() - startMS, (millis() - startMS) / jobs.size());
+    }
+}
+
+void OpenStreetMap::makeJobList(const tileList &requiredTiles, std::vector<TileJob> &jobs, uint8_t zoom, TileBufferList &tilePointers)
+{
+    for (const auto &[x, y] : requiredTiles)
+    {
+        if (y < 0 || y >= (1 << zoom))
+        {
+            tilePointers.push_back(nullptr); // we need to keep 1:1 grid alignment with requiredTiles for composeMap
+            continue;
+        }
+
+        const CachedTile *cachedTile = isTileCached(x, y, zoom);
+        if (cachedTile)
+        {
+            tilePointers.push_back(cachedTile->buffer);
+            continue;
+        }
+
+        // Check if this tile is already in the job list
+        const auto job = std::find_if(jobs.begin(), jobs.end(), [&](const TileJob &job)
+                                      { return job.x == x && job.y == static_cast<uint32_t>(y) && job.z == zoom; });
+        if (job != jobs.end())
+        {
+            tilePointers.push_back(job->tile->buffer); // reuse buffer from already queued job
+            continue;
+        }
+
+        CachedTile *tileToReplace = findUnusedTile(requiredTiles, zoom);
+        if (!tileToReplace)
+        {
+            log_e("Cache error, no unused tile found, could not store tile %lu, %i, %u", x, y, zoom);
+            tilePointers.push_back(nullptr); // again, keep 1:1 aligned
+            continue;
+        }
+
+        tilePointers.push_back(tileToReplace->buffer);                      // store buffer for rendering
+        jobs.push_back({x, static_cast<uint32_t>(y), zoom, tileToReplace}); // queue job
+    }
+}
+
+void OpenStreetMap::runJobs(const std::vector<TileJob> &jobs)
+{
+    log_d("submitting %i jobs", (int)jobs.size());
+
+    pendingJobs.store(jobs.size());
+    startJobsMS = millis();
+    for (const TileJob &job : jobs)
+        if (xQueueSend(jobQueue, &job, 0) != pdPASS)
+        {
+            log_e("Failed to enqueue TileJob");
+            --pendingJobs;
+        }
+
+    while (pendingJobs.load() > 0)
+        vTaskDelay(pdMS_TO_TICKS(1));
+}
+
+bool OpenStreetMap::composeMap(LGFX_Sprite &mapSprite, TileBufferList &tilePointers)
+{
+    if (mapSprite.width() != mapWidth || mapSprite.height() != mapHeight)
+    {
+        mapSprite.deleteSprite();
+        mapSprite.setPsram(true);
+        mapSprite.setColorDepth(lgfx::rgb565_2Byte);
+        mapSprite.createSprite(mapWidth, mapHeight);
+        if (!mapSprite.getBuffer())
+        {
+            log_e("could not allocate map");
+            return false;
+        }
+    }
+
+    for (size_t tileIndex = 0; tileIndex < tilePointers.size(); ++tileIndex)
+    {
+        const int drawX = startOffsetX + (tileIndex % numberOfColums) * currentProvider->tileSize;
+        const int drawY = startOffsetY + (tileIndex / numberOfColums) * currentProvider->tileSize;
+        const uint16_t *tile = tilePointers[tileIndex];
+        if (!tile)
+        {
+            mapSprite.fillRect(drawX, drawY, currentProvider->tileSize, currentProvider->tileSize, OSM_BGCOLOR);
+            continue;
+        }
+        mapSprite.pushImage(drawX, drawY, currentProvider->tileSize, currentProvider->tileSize, tile);
+    }
+
+    mapSprite.setTextColor(TFT_WHITE, OSM_BGCOLOR);
+    mapSprite.drawRightString(currentProvider->attribution, mapSprite.width(), mapSprite.height() - 10, &DejaVu9Modded);
+    mapSprite.setTextColor(TFT_WHITE, TFT_BLACK);
+    return true;
+}
+
+bool OpenStreetMap::fetchMap(LGFX_Sprite &mapSprite, double longitude, double latitude, uint8_t zoom, unsigned long timeoutMS)
+{
+    if (!tasksStarted && !startTileWorkerTasks())
+    {
+        log_e("Failed to start tile worker(s)");
+        return false;
+    }
+
+    if (zoom < currentProvider->minZoom || zoom > currentProvider->maxZoom)
+    {
+        log_e("Invalid zoom level: %d", zoom);
+        return false;
+    }
+
+    if (!mapWidth || !mapHeight)
+    {
+        log_e("Invalid map dimension");
+        return false;
+    }
+
+    if (!tilesCache.capacity() && !resizeTilesCache(tilesNeeded(mapWidth, mapHeight)))
+    {
+        log_e("Could not allocate tile cache");
+        return false;
+    }
+
+    // Web Mercator projection only supports latitudes up to ~85.0511°.
+    // See https://en.wikipedia.org/wiki/Web_Mercator_projection#Formulas
+    // We use 85.0° as a safe and simple boundary.
+    constexpr double MAX_MERCATOR_LAT = 85.0;
+
+    longitude = fmod(longitude + 180.0, 360.0) - 180.0;
+    latitude = std::clamp(latitude, -MAX_MERCATOR_LAT, MAX_MERCATOR_LAT);
+
+    tileList requiredTiles;
+    computeRequiredTiles(longitude, latitude, zoom, requiredTiles);
+    if (tilesCache.capacity() < requiredTiles.size())
+    {
+        log_e("Caching error: Need %i cache slots, but only %i are provided", requiredTiles.size(), tilesCache.capacity());
+        return false;
+    }
+
+    mapTimeoutMS = timeoutMS;
+    TileBufferList tilePointers;
+    updateCache(requiredTiles, zoom, tilePointers);
+    if (!composeMap(mapSprite, tilePointers))
+    {
+        log_e("Failed to compose map");
+        return false;
+    }
+    return true;
+}
+
+void OpenStreetMap::PNGDraw(PNGDRAW *pDraw)
+{
+    uint16_t *destRow = currentInstance->currentTileBuffer + (pDraw->y * currentInstance->currentProvider->tileSize);
+    getPNGCurrentCore()->getLineAsRGB565(pDraw, destRow, PNG_RGB565_BIG_ENDIAN, 0xffffffff);
+}
+
+bool OpenStreetMap::fetchTile(ReusableTileFetcher &fetcher, CachedTile &tile, uint32_t x, uint32_t y, uint8_t zoom, String &result, unsigned long timeout)
+{
+    /* Tile source per mode: AUTO = SD first then network; SD_ONLY = SD only;
+     * NET_ONLY = network only. */
+    char url[256] = "";
+    MemoryBuffer buffer = MemoryBuffer::empty();
+    if (tileMode != TILE_NET_ONLY)
+        buffer = loadTileFromSD(x, y, zoom);
+    if (buffer.isAllocated())
+    {
+        log_i("tile z=%u x=%lu y=%lu loaded from SD",
+              zoom, (unsigned long)x, (unsigned long)y);
+        if (isJPEG(buffer))
+        {
+            /* JPEG tile from SD -> TJpgDec -> RGB565 buffer. */
+            if (!decodeJPEGtoBuffer(buffer, tile.buffer,
+                                    currentProvider->tileSize, result))
+            {
+                log_e("JPEG tile decode failed: %s", result.c_str());
+                return false;
+            }
+            tile.x = x;
+            tile.y = y;
+            tile.z = zoom;
+            return true;
+        }
+        /* PNG tile from SD falls through to the shared PNG decode below. */
+    }
+    else if (tileMode == TILE_SD_ONLY)
+    {
+        result = "offline: tile not on SD";
+        return false;
+    }
+    else
+    {
+        if (currentProvider->requiresApiKey)
+        {
+            snprintf(url, sizeof(url),
+                     currentProvider->urlTemplate,
+                     zoom, x, y, currentProvider->apiKey);
+        }
+        else
+        {
+            snprintf(url, sizeof(url),
+                     currentProvider->urlTemplate,
+                     zoom, x, y);
+        }
+
+        buffer = fetcher.fetchToBuffer(url, result, timeout);
+        if (!buffer.isAllocated())
+            return false;
+    }
+
+    [[maybe_unused]] const unsigned long startMS = millis();
+
+    PNG *png = getPNGCurrentCore();
+    const int16_t rc = png->openRAM(buffer.get(), buffer.size(), PNGDraw);
+    if (rc != PNG_SUCCESS)
+    {
+        result = "PNG Decoder Error: " + String(rc);
+        return false;
+    }
+
+    if (png->getWidth() != currentProvider->tileSize || png->getHeight() != currentProvider->tileSize)
+    {
+        result = "Unexpected tile size: w=" + String(png->getWidth()) + " h=" + String(png->getHeight());
+        return false;
+    }
+
+    currentInstance = this;
+    currentTileBuffer = tile.buffer;
+    const int decodeResult = png->decode(0, PNG_FAST_PALETTE);
+    if (decodeResult != PNG_SUCCESS)
+    {
+        result = "Decoding " + String(url) + " failed with code: " + String(decodeResult);
+        return false;
+    }
+
+    log_d("decoding %s took %lu ms on core %i", url, millis() - startMS, xPortGetCoreID());
+
+    tile.x = x;
+    tile.y = y;
+    tile.z = zoom;
+    return true;
+}
+
+void OpenStreetMap::tileFetcherTask(void *param)
+{
+    ReusableTileFetcher fetcher;
+    OpenStreetMap *osm = static_cast<OpenStreetMap *>(param);
+    while (true)
+    {
+        TileJob job;
+        xQueueReceive(osm->jobQueue, &job, portMAX_DELAY);
+        [[maybe_unused]] const unsigned long startMS = millis();
+
+        if (job.z == 255)
+            break;
+
+        const uint32_t elapsedMS = millis() - osm->startJobsMS;
+        if (osm->mapTimeoutMS && elapsedMS >= osm->mapTimeoutMS)
+        {
+            log_w("Map timeout (%lu ms) exceeded after %lu ms, dropping job",
+                  osm->mapTimeoutMS, elapsedMS);
+
+            osm->invalidateTile(job.tile);
+            --osm->pendingJobs;
+            continue;
+        }
+
+        uint32_t remainingMS = 0;
+        if (osm->mapTimeoutMS > 0)
+        {
+            remainingMS = osm->mapTimeoutMS - elapsedMS;
+            if (remainingMS == 0)
+            {
+                log_w("No budget left for job, dropping");
+                osm->invalidateTile(job.tile);
+                --osm->pendingJobs;
+                continue;
+            }
+        }
+
+        String result;
+        if (!osm->fetchTile(fetcher, *job.tile, job.x, job.y, job.z, result, remainingMS))
+        {
+            log_e("Tile fetch failed: %s", result.c_str());
+            osm->invalidateTile(job.tile);
+        }
+        else
+        {
+            job.tile->valid = true;
+            log_d("core %i fetched tile z=%u x=%lu, y=%lu in %lu ms",
+                  xPortGetCoreID(), job.z, job.x, job.y, millis() - startMS);
+        }
+        job.tile->busy = false;
+        --osm->pendingJobs;
+    }
+    log_d("task on core %i exiting", xPortGetCoreID());
+    xTaskNotifyGive(osm->ownerTask);
+    vTaskDelete(nullptr);
+}
+
+bool OpenStreetMap::startTileWorkerTasks()
+{
+    if (tasksStarted)
+        return true;
+
+    if (!jobQueue)
+    {
+        jobQueue = xQueueCreate(OSM_JOB_QUEUE_SIZE, sizeof(TileJob));
+        if (!jobQueue)
+        {
+            log_e("Failed to create job queue!");
+            return false;
+        }
+    }
+
+    numberOfWorkers = OSM_FORCE_SINGLECORE ? 1 : ESP.getChipCores();
+    for (int core = 0; core < numberOfWorkers; ++core)
+    {
+        if (!getPNGForCore(core))
+        {
+            log_e("Failed to initialize PNG decoder on core %d", core);
+            return false;
+        }
+    }
+
+    ownerTask = xTaskGetCurrentTaskHandle();
+    for (int core = 0; core < numberOfWorkers; ++core)
+    {
+        if (!xTaskCreatePinnedToCore(tileFetcherTask,
+                                     nullptr,
+                                     OSM_TASK_STACKSIZE,
+                                     this,
+                                     OSM_TASK_PRIORITY,
+                                     nullptr,
+                                     OSM_FORCE_SINGLECORE ? OSM_SINGLECORE_NUMBER : core))
+        {
+            log_e("Failed to create tile fetcher task on core %d", core);
+            return false;
+        }
+    }
+
+    tasksStarted = true;
+
+    log_i("Started %d tile worker task(s)", numberOfWorkers);
+    return true;
+}
+
+uint16_t OpenStreetMap::tilesNeeded(uint16_t mapWidth, uint16_t mapHeight)
+{
+    const int tileSize = currentProvider->tileSize;
+    int tilesX = (mapWidth + tileSize - 1) / tileSize + 1;
+    int tilesY = (mapHeight + tileSize - 1) / tileSize + 1;
+    return tilesX * tilesY;
+}
+
+bool OpenStreetMap::setTileProvider(int index)
+{
+    if (index < 0 || index >= OSM_TILEPROVIDERS)
+    {
+        log_e("invalid provider index");
+        return false;
+    }
+
+    currentProvider = &tileProviders[index];
+    freeTilesCache();
+    log_i("provider changed to '%s'", currentProvider->name);
+    return true;
+}
+
+void OpenStreetMap::invalidateTile(CachedTile *tile)
+{
+    if (!tile)
+        return;
+
+    const size_t tileByteCount = currentProvider->tileSize * currentProvider->tileSize * 2;
+    memset(tile->buffer, 0, tileByteCount);
+
+    tile->valid = false;
+    tile->busy = false;
+}
