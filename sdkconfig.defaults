@@ -1,0 +1,78 @@
+# ESP-IDF sdkconfig defaults for Google Maps on ILI9341 project (ESP32-S3)
+# Target
+CONFIG_IDF_TARGET="esp32s3"
+
+# WiFi
+CONFIG_ESP_WIFI_SSID=""
+CONFIG_ESP_WIFI_PASSWORD=""
+CONFIG_ESP_MAXIMUM_RETRY=10
+
+# mbedTLS – use certificate bundle for HTTPS
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+
+# HTTP client
+CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y
+
+# SPI
+CONFIG_SPI_MASTER_IN_IRAM=y
+CONFIG_SPI_MASTER_ISR_IN_IRAM=y
+
+# Main task stack (WiFi + HTTP + JPEG rendering)
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# Enable large HTTP downloads
+CONFIG_ESP_HTTP_CLIENT_ENABLE_DIGEST_AUTH=n
+
+# BLE enabled — the phone streams map/nav packets to the display via BLE
+# (Arduino BLE / Bluedroid, as in osm_touch's ble_nav/ble_scan).
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=y
+
+# Arduino USB CDC for Serial on the native USB-Serial/JTAG port (COM9)
+CONFIG_ARDUINO_USB_CDC_ON_BOOT=y
+
+# esp32-arduino requires a 1000 Hz tick
+CONFIG_FREERTOS_HZ=1000
+
+# 16MB flash chip; use the project's custom partition table (14MB app) so
+# there is lots of room for embedded offline map tiles.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# PSRAM — the board has 8MB octal PSRAM (AP_3v3). Used for the big map/canvas
+# framebuffers so internal SRAM stays free for LVGL/BLE.
+CONFIG_SPIRAM=y
+CONFIG_ESP32S3_SPIRAM_SUPPORT=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# LVGL graphics library
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_USE_CANVAS=y
+CONFIG_LV_USE_LODEPNG=n   # embedded tiles are JPEG, not PNG
+CONFIG_LV_USE_TJPGD=y     # LVGL's built-in JPEG decoder (decodes the embedded tiles)
+CONFIG_LV_USE_FS_MEMFS=y  # LVGL memfs drive letter must be valid ('M' = 77)
+CONFIG_LV_FS_MEMFS_LETTER=77
+# No image caching: tiles are decoded one-at-a-time and freed after blitting.
+CONFIG_LV_CACHE_DEF_SIZE=0
+
+# Arduino autostart: the arduino component provides app_main (setup/loop)
+CONFIG_AUTOSTART_ARDUINO=y
+# Arduino NetworkClientSecure (ssl_client.cpp) requires mbedTLS PSK ciphersuites
+CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
+CONFIG_MBEDTLS_PSK_MODES=y
+# Bluedroid GAP: enable BLE 4.2 advertising + scanning (Arduino BLE needs these)
+CONFIG_BT_BLE_42_ADV_EN=y
+CONFIG_BT_BLE_42_SCAN_EN=y
+# BLE 4.2 features gate (Arduino BLE GAP adv/scan needs these)
+CONFIG_BT_BLE_ENABLED=y
+CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
+
+# SD/TF card (SDMMC 4-bit) mounted at /sdcard — exFAT requires LFN enabled
+CONFIG_FATFS_LFN_HEAP=y

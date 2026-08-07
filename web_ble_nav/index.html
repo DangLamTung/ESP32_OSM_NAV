@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>OSM Nav — Web Bluetooth · ESP32-S3 map</title>
+<style>
+  :root { --bg:#0f1520; --panel:#171f2e; --line:#263349; --tx:#dfe8f5; --dim:#7c8aa0; --acc:#1a73e8; --ok:#22c55e; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--tx); font:14px/1.45 "Segoe UI",system-ui,sans-serif; }
+  header { display:flex; align-items:center; gap:12px; padding:12px 20px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  header .dot { width:10px;height:10px;border-radius:50%;background:#555;display:inline-block; }
+  header .dot.on { background:var(--ok); box-shadow:0 0 8px var(--ok); }
+  main { display:grid; grid-template-columns:minmax(0,1fr) 320px; gap:16px; padding:16px 20px; max-width:1100px; margin:0 auto; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .panel h2 { margin:0 0 10px; font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); }
+  button { background:var(--acc); color:#fff; border:0; border-radius:6px; padding:8px 14px; font-size:13px; cursor:pointer; }
+  button:hover { filter:brightness(1.1); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--tx); }
+  label { display:block; font-size:12px; color:var(--dim); margin:10px 0 4px; }
+  input, select, textarea { width:100%; background:#0d1420; color:var(--tx); border:1px solid var(--line); border-radius:6px; padding:8px; font-size:13px; font-family:inherit; }
+  textarea { min-height:110px; resize:vertical; font-family:Consolas,monospace; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:10px; }
+  .row input[type=number] { width:80px; }
+  .log { background:#0a0f18; border:1px solid var(--line); border-radius:6px; padding:8px; height:220px; overflow:auto; font:12px/1.5 Consolas,monospace; white-space:pre-wrap; }
+  .log .sent { color:#8ab4ff; }
+  .log .sys { color:var(--dim); }
+  .log .err { color:#f87171; }
+  .hint { font-size:12px; color:var(--dim); margin-top:8px; }
+  .badge { font-size:12px; color:var(--dim); }
+  @media (max-width:820px){ main{ grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>OSM Nav — Web Bluetooth → ESP32-S3 map</h1>
+  <span class="badge">service 5a7e1000 · NAV-OSM</span>
+</header>
+
+<main>
+  <!-- LEFT: route / drive simulation -->
+  <section>
+    <div class="panel">
+      <h2>1 · Route</h2>
+      <label>Route XML <span class="hint">(route around Bến Thành, z15)</span></label>
+      <textarea id="routeXml"></textarea>
+      <div class="row">
+        <button id="btnSample">Load sample route</button>
+        <button id="btnSendRoute">Send route → board</button>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:16px">
+      <h2>2 · Drive simulation (live position)</h2>
+      <p class="hint" style="margin:0">Steps the vehicle along the route at 1 Hz and sends <code>&lt;pos&gt;</code> packets so you can watch the map follow.</p>
+      <div class="row">
+        <label style="margin:0">Speed (km/h) <input type="number" id="simSpd" value="30" min="0" max="200" /></label>
+        <button id="btnSim">Start simulate</button>
+        <button id="btnStopSim" class="ghost" disabled>Stop</button>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:16px">
+      <h2>3 · Maneuver + position (manual)</h2>
+      <div class="row">
+        <label style="margin:0">Turn <select id="manType">
+          <option>straight</option><option>left</option><option>right</option>
+          <option>slight-left</option><option>slight-right</option>
+          <option>u-turn</option><option>roundabout</option><option>arrive</option>
+        </select></label>
+        <label style="margin:0">Dist m <input type="number" id="manDist" value="85" /></label>
+        <label style="margin:0">Street <input type="text" id="manStreet" value="Nguyen Hue" style="width:120px" /></label>
+        <button id="btnMan">Send nav</button>
+      </div>
+      <div class="row">
+        <label style="margin:0">Lat <input type="number" id="posLat" step="0.00001" value="10.77180" /></label>
+        <label style="margin:0">Lon <input type="number" id="posLon" step="0.00001" value="106.69820" /></label>
+        <label style="margin:0">Hdg <input type="number" id="posHdg" value="312" min="0" max="359" /></label>
+        <button id="btnPos">Send pos</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- RIGHT: connect + log -->
+  <aside>
+    <div class="panel">
+      <h2>Connect</h2>
+      <button id="btnConnect" style="width:100%">🔗 Connect to NAV-OSM</button>
+      <button id="btnDisconnect" class="ghost" style="width:100%;margin-top:8px" disabled>Disconnect</button>
+      <p class="hint">Needs Chrome/Edge. Serve this page over <b>https</b> or <b>localhost</b> (Web Bluetooth requires a secure context) — e.g. <code>python -m http.server 8000</code> then open <code>http://localhost:8000</code>.</p>
+    </div>
+    <div class="panel" style="margin-top:16px">
+      <h2>Log</h2>
+      <div class="log" id="log"></div>
+    </div>
+  </aside>
+</main>
+
+<script>
+// ---- BLE ----
+const SERVICE = "5a7e1000-2b2f-4f66-9f9a-5c0f8e1a2b3c";
+const CHAR    = "5a7e1001-2b2f-4f66-9f9a-5c0f8e1a2b3c";
+let server = null, chr = null;
+
+const $ = id => document.getElementById(id);
+const logEl = $("log");
+function log(msg, cls) {
+  const t = new Date().toLocaleTimeString("en-GB");
+  const div = document.createElement("div");
+  if (cls) div.className = cls;
+  div.textContent = `[${t}] ${msg}`;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function setConn(on) {
+  $("dot").classList.toggle("on", on);
+  $("btnConnect").disabled = on;
+  $("btnDisconnect").disabled = !on;
+}
+
+$("btnConnect").onclick = async () => {
+  try {
+    const dev = await navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE] }] });
+    log(`device: ${dev.name || dev.id}`, "sys");
+    server = await dev.gatt.connect();
+    const svc = await server.getPrimaryService(SERVICE);
+    chr = await svc.getCharacteristic(CHAR);
+    const val = await chr.readValue();
+    log(`connected · board says: "${new TextDecoder().decode(val)}"`, "sys");
+    chr.addEventListener("characteristicvaluechanged", e =>
+      log("notify: " + new TextDecoder().decode(e.target.value), "sys"));
+    await chr.startNotifications();
+    setConn(true);
+  } catch (e) {
+    log("connect failed: " + e.message, "err");
+  }
+};
+
+$("btnDisconnect").onclick = async () => {
+  try { if (server && server.connected) await server.disconnect(); } catch {}
+  server = null; chr = null; setConn(false); log("disconnected", "sys");
+};
+
+async function send(packet) {
+  if (!chr) { log("not connected yet", "err"); return; }
+  try {
+    // append a 0x00 terminator — the board finalizes packets on it
+    const bytes = new Uint8Array(packet.length + 1);
+    for (let i = 0; i < packet.length; i++) bytes[i] = packet.charCodeAt(i) & 0xff;
+    bytes[packet.length] = 0;
+    await chr.writeValue(bytes);
+    log("> " + packet, "sent");
+  } catch (e) { log("send failed: " + e.message, "err"); }
+}
+
+// ---- sample route: rectangle loop around Bến Thành (z15) ----
+function sampleRoute() {
+  const c = { lat: 10.7718, lon: 106.6982 };
+  const dLat = 0.012, dLon = 0.018, n = 12;
+  const pts = [];
+  const push = (lat, lon) => pts.push({ lat, lon });
+  for (let i = 0; i <= n; i++) push(c.lat - dLat + (2 * dLat) * i / n, c.lon - dLon);
+  for (let i = 1; i <= n; i++) push(c.lat + dLat, c.lon - dLon + (2 * dLon) * i / n);
+  for (let i = 1; i <= n; i++) push(c.lat + dLat - (2 * dLat) * i / n, c.lon + dLon);
+  for (let i = 1; i <  n; i++) push(c.lat - dLat, c.lon + dLon - (2 * dLon) * i / n);
+  return `<route z="15">` + pts.map(p => `<p lat="${p.lat.toFixed(6)}" lon="${p.lon.toFixed(6)}"/>`).join("") + `</route>`;
+}
+
+$("btnSample").onclick = () => { $("routeXml").value = sampleRoute(); log("sample route loaded", "sys"); };
+$("btnSendRoute").onclick = async () => {
+  const xml = $("routeXml").value.trim();
+  if (!/<\/route>/.test(xml)) { log("route must end with </route>", "err"); return; }
+  await send(xml);
+};
+
+// ---- maneuver / pos ----
+$("btnMan").onclick = () =>
+  send(`<nav d="${$("manDist").value}" m="${$("manType").value}" s="${$("manStreet").value}"></nav>`);
+$("btnPos").onclick = () =>
+  send(`<pos lat="${$("posLat").value}" lon="${$("posLon").value}" spd="${$("simSpd").value}" hdg="${$("posHdg").value}"></pos>`);
+
+// ---- simulate: step along the route at 1 Hz ----
+let simTimer = null;
+function parseRoutePts() {
+  const xml = $("routeXml").value;
+  const out = [];
+  const re = /<p\s+lat="([-\d.]+)"\s+lon="([-\d.]+)"\s*\/>/g;
+  let m;
+  while ((m = re.exec(xml))) out.push({ lat: parseFloat(m[1]), lon: parseFloat(m[2]) });
+  return out;
+}
+function heading(a, b) {
+  const x = Math.cos(a.lat * Math.PI / 180) * Math.sin((b.lon - a.lon) * Math.PI / 180);
+  const y = Math.cos(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) -
+            Math.sin(a.lat * Math.PI / 180) * Math.sin(b.lat * Math.PI / 180) *
+            Math.cos((b.lon - a.lon) * Math.PI / 180);
+  return Math.round((Math.atan2(x, y) * 180 / Math.PI + 360) % 360);
+}
+$("btnSim").onclick = async () => {
+  const pts = parseRoutePts();
+  if (pts.length < 2) { log("need a route first (load sample)", "err"); return; }
+  let i = 0;
+  $("btnSim").disabled = true; $("btnStopSim").disabled = false;
+  log(`simulate: ${pts.length} pts @ ${$("simSpd").value} km/h`, "sys");
+  simTimer = setInterval(async () => {
+    const a = pts[i % pts.length];
+    const b = pts[(i + 1) % pts.length];
+    await send(`<pos lat="${a.lat.toFixed(6)}" lon="${a.lon.toFixed(6)}" spd="${$("simSpd").value}" hdg="${heading(a, b)}"></pos>`);
+    $("posLat").value = a.lat.toFixed(5);
+    $("posLon").value = a.lon.toFixed(5);
+    $("posHdg").value = heading(a, b);
+    i++;
+  }, 1000);
+};
+$("btnStopSim").onclick = () => {
+  clearInterval(simTimer); simTimer = null;
+  $("btnSim").disabled = false; $("btnStopSim").disabled = true;
+  log("simulate stopped", "sys");
+};
+
+// ---- init ----
+$("routeXml").value = sampleRoute();
+log("ready — connect to NAV-OSM, then send a route and simulate a drive", "sys");
+</script>
+</body>
+</html>

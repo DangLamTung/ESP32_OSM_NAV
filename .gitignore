@@ -1,0 +1,27 @@
+# ESP-IDF build artifacts
+/build/
+/sdkconfig
+/sdkconfig.old
+/dependencies.lock
+
+# ESP-IDF managed components + vendored components pulled by idf_component.yml
+/managed_components/
+/components/LovyanGFX/
+/components/OpenStreetMap-esp32/
+/components/PNGdec/
+/components/TJpgDec/
+
+# Local secrets (WiFi credentials) - never commit
+/src/secrets.h
+
+# Downloaded tile data (large, regenerable)
+/tiles/
+/tiles_hcmc/
+/tiles_z15test/
+
+# Build/preview scratch
+/preview/
+
+# OS / editor
+.DS_Store
+Thumbs.db
