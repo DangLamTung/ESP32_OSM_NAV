@@ -142,6 +142,49 @@ static void drawWeatherWidget(LGFX_Sprite &spr)
   spr.print("%");
 }
 
+/* ---- speed-camera alert: amber badge with a camera glyph + distance.
+ *      Drawn when the phone app announces a camera ahead (BLE 0x09). ---- */
+static void drawCameraWidget(LGFX_Sprite &spr, int cx, int cy)
+{
+  const NavCamera *cam = navGetCamera();
+  if (!cam || !cam->valid) return;
+
+  const uint16_t AMBER = spr.color565(255, 176, 0);
+  const uint16_t DARK  = 0x2104;
+
+  char label[16];
+  snprintf(label, sizeof label, "%s", cam->type == 1 ? "MOBILE CAM" : "CAMERA");
+  char dist[16];
+  snprintf(dist, sizeof dist, "%d m", cam->dist);
+
+  spr.setFont(&FontVN);
+  spr.setTextSize(1);
+  int wl = spr.textWidth(label);
+  int wd = spr.textWidth(dist);
+  int w  = wl + wd + 34;                 /* glyph + paddings */
+  int x0 = cx - w / 2, y0 = cy - 13;
+  if (x0 < 4) x0 = 4;
+
+  /* amber warning badge */
+  spr.fillRoundRect(x0, y0, w, 26, 6, AMBER);
+  spr.drawRoundRect(x0, y0, w, 26, 6, TFT_WHITE);
+
+  /* camera glyph: dark body + viewfinder + lens */
+  int gx = x0 + 14, gy = y0 + 13;
+  spr.fillRoundRect(gx - 7, gy - 4, 14, 9, 2, DARK);
+  spr.fillRect(gx - 1, gy - 6, 2, 2, DARK);        /* viewfinder */
+  spr.fillCircle(gx + 1, gy, 3, DARK);             /* lens body */
+  spr.drawCircle(gx + 1, gy, 3, TFT_WHITE);        /* lens ring */
+
+  spr.setTextColor(TFT_BLACK, AMBER);
+  spr.setCursor(x0 + 24, y0 + 7);
+  spr.print(label);
+  spr.setTextColor(0x5A3800, AMBER);
+  spr.setCursor(x0 + w - 4 - wd, y0 + 7);
+  spr.print(dist);
+  spr.setTextFont(1);
+}
+
 /* ---- bottom bar: speed / time / ETA strip ---- */
 static void drawBottomBar(LGFX_Sprite &spr) {
   const NavPos   *pos  = navGetPos();
@@ -434,6 +477,9 @@ static void drawTextOnlyHUD(LGFX_Sprite &spr)
   /* weather widget, top-right (below the time/ETA line, clear of the arrow) */
   drawWeatherWidget(spr);
 
+  /* speed-camera alert (if announced ahead), centred above the big arrow */
+  drawCameraWidget(spr, SCREEN_W / 2, 28);
+
   if (n1 && n1->valid) {
     /* BIG next-maneuver arrow, dead centre of the screen (40px icon * 1.6) */
     drawBannerArrow(spr, SCREEN_W / 2, 74, n1->maneuver, 1.6f);
@@ -517,6 +563,9 @@ void ui_draw_nav_hud(LGFX_Sprite &spr)
   if (man && man->valid) drawTwoStepHUD(spr);
   drawWeatherWidget(spr);
   drawBottomBar(spr);
+
+  /* speed-camera alert (if announced), top-left under the guidance strip */
+  drawCameraWidget(spr, 100, 62);
 }
 
 /* ===== DEBUG (temp): verify FontVN glyph coverage. Renders each Vietnamese

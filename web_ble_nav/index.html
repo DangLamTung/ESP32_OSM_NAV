@@ -135,6 +135,22 @@
         <button id="btnWeather">Send weather</button>
       </div>
     </div>
+
+    <div class="panel">
+      <h2>6 · Speed camera (HUD alert)</h2>
+      <p class="hint" style="margin:0">Sends a <code>0x09 camera</code> packet; the board shows an amber
+      <b>CAMERA nnn m</b> alert while the car is near a camera. Dist 0 clears it. During a drive the sim
+      auto-announces a camera ahead every ~3 km so you can watch it count down.</p>
+      <div class="row">
+        <label style="margin:0">Dist m <input type="number" id="camDist" value="500" min="0" max="5000" /></label>
+        <label style="margin:0">Type <select id="camType">
+          <option value="0">Fixed</option>
+          <option value="1">Mobile</option>
+        </select></label>
+        <button id="btnCamera">Send camera</button>
+        <button id="btnCameraClear" class="ghost">Clear</button>
+      </div>
+    </div>
   </section>
 
   <!-- RIGHT: connect + log -->
@@ -247,7 +263,7 @@ async function send(packet) {
  *   0x04 eta  : h(u8) m(u8) alen(u8) arrive (UTF-8)
  *   0x05 clock: h(u8) m(u8)
  */
-const BIN_T = { ROUTE: 0x01, POS: 0x02, NAV: 0x03, ETA: 0x04, CLOCK: 0x05, WEATHER: 0x07, NAV2: 0x08 };
+const BIN_T = { ROUTE: 0x01, POS: 0x02, NAV: 0x03, ETA: 0x04, CLOCK: 0x05, WEATHER: 0x07, NAV2: 0x08, CAMERA: 0x09 };
 const MANEUVER_ID = { straight: 0, left: 1, right: 2, "slight-left": 3, "slight-right": 4, "u-turn": 5, roundabout: 6, arrive: 7 };
 
 function binFrame(type, payload) {
@@ -367,6 +383,15 @@ function encClock(h, m) {
   p[1] = Math.max(0, Math.min(59, Math.round(m) || 0));
   return binFrame(BIN_T.CLOCK, p);
 }
+/* 0x09 camera ahead: dist(u16) type(u8). dist=0 clears the alert. */
+function encCamera(dist, type) {
+  const p = new Uint8Array(3);
+  const v = new DataView(p.buffer);
+  v.setUint16(0, Math.max(0, Math.min(65535, Math.round(dist) || 0)), true);
+  p[2] = type ? 1 : 0;
+  return binFrame(BIN_T.CAMERA, p);
+}
+
 /* 0x07 weather: tempC(s8) humidity(u8) code(u8) slen(u8) text[UTF-8] */
 function encWeather(tempC, humidity, code, text) {
   const s = new TextEncoder().encode(text || "");
@@ -517,6 +542,10 @@ $("btnEta").onclick = () =>
   sendBytes(encEta(+$("etaH").value, +$("etaM").value, $("etaA").value));
 $("btnWeather").onclick = () =>
   sendBytes(encWeather(+$("wxT").value, +$("wxH").value, +$("wxCode").value, $("wxTxt").value));
+$("btnCamera").onclick = () =>
+  sendBytes(encCamera(+$("camDist").value, +$("camType").value));
+$("btnCameraClear").onclick = () =>
+  sendBytes(encCamera(0, 0));
 
 // ---- simulate: drive ALONG the route polyline at a set speed ----
 // Distance along the polyline is interpolated, so the marker glides along the
@@ -658,6 +687,8 @@ function startSim(spd, mult) {
   let tickCount = 0;
   let lastNav = null, lastNav2 = null;   /* for change-only BLE sends */
   let lastMinKey = -1;                   /* clock/ETA sent once per minute */
+  let camActive = null, camLastDist = -1;/* speed-camera announce demo */
+  let nextCamTrigger = 700;              /* announce a camera 700m ahead of this point */
   $("btnSim").disabled = true; $("btnStopSim").disabled = false;
   log(`simulate: ${fullRoutePts.length} pts, ${simState.total.toFixed(0)} m route @ ${spd} km/h ×${mult} (batched to the board)`, "sys");
   const TICK = 100;   // ms — ~10 pos packets/s. Lower than before so the BLE
@@ -713,6 +744,21 @@ function startSim(spd, mult) {
       $("posLat").value = p.lat.toFixed(5);
       $("posLon").value = p.lon.toFixed(5);
       $("posHdg").value = p.hdg;
+      /* speed-camera demo: announce one 700m ahead, count it down as we drive,
+       * clear (dist 0) once passed, then schedule the next one ~3km later. */
+      if (camActive) {
+        camActive.dist = Math.max(0, Math.round(camActive.pos - travelled));
+        if ((tickCount % 10) === 0 || camActive.dist === 0 || camActive.dist !== camLastDist) {
+          camLastDist = camActive.dist;
+          await sendBytes(encCamera(camActive.dist, 0));
+          if (camActive.dist === 0) camActive = null;
+        }
+      } else if (travelled >= nextCamTrigger) {
+        camActive = { pos: travelled + 700, dist: 700 };
+        camLastDist = 700;
+        nextCamTrigger = travelled + 3000;
+        await sendBytes(encCamera(700, 0));
+      }
     } finally {
       simTickBusy = false;
     }

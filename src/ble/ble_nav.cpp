@@ -41,6 +41,7 @@ static NavPos      g_pos;
 static NavEta      g_eta;
 static NavClock    g_clock;
 static NavWeather  g_weather;
+static NavCamera   g_camera;      // speed camera ahead (type 0x09)
 static volatile bool g_routeDirty = false;
 static volatile bool g_contDirty  = false;
 static volatile bool g_manDirty   = false;
@@ -49,6 +50,7 @@ static volatile bool g_posDirty   = false;
 static volatile bool g_etaDirty   = false;
 static volatile bool g_clockDirty = false;
 static volatile bool g_weatherDirty = false;
+static volatile bool g_cameraDirty = false;
 static volatile bool g_connected  = false;
 static BLECharacteristic *g_navChar = nullptr;   // NOTIFY out (GPS broadcast)
 static BLECharacteristic *g_weatherChar = nullptr;
@@ -265,6 +267,20 @@ static void parseWeatherBin(const uint8_t *p, int len) {
   ESP_LOGI(TAG, "[nav] weather(bin) %dC %d%% code=%d \"%s\"", w.tempC, w.humidity, w.code, w.text);
 }
 
+/* 0x09 — speed camera ahead: dist(u16) type(u8). dist=0 clears the alert. */
+static void parseCameraBin(const uint8_t *p, int len) {
+  NavCamera c;
+  c.valid = false;
+  c.dist = 0; c.type = 0;
+  if (len < 3) return;
+  c.dist = p[0] | (p[1] << 8);
+  c.type = p[2];
+  c.valid = (c.dist > 0);
+  g_camera      = c;
+  g_cameraDirty = true;
+  ESP_LOGI(TAG, "[nav] camera(bin) d=%dm type=%d", c.dist, c.type);
+}
+
 static void parsePosBin(const uint8_t *p, int len) {
   if (len < 12) return;
   int32_t lat = (int32_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));
@@ -361,6 +377,7 @@ static void dispatchBinary(uint8_t type, const uint8_t *p, int len) {
     case 0x06: parseRouteContBin(p, len);  break;
     case 0x07: parseWeatherBin(p, len);    break;
     case 0x08: parseNav2Bin(p, len);       break;
+    case 0x09: parseCameraBin(p, len);     break;
     default:
       ESP_LOGI(TAG, "[nav] unknown binary type %d (%d bytes)", type, len);
       break;
@@ -558,6 +575,7 @@ const NavPos*      navGetPos(void)      { return &g_pos; }
 const NavEta*      navGetEta(void)      { return &g_eta; }
 const NavClock*    navGetClock(void)    { return &g_clock; }
 const NavWeather*  navGetWeather(void)  { return &g_weather; }
+const NavCamera*   navGetCamera(void)   { return &g_camera; }
 
 bool navEtaDirty(void)   { return g_etaDirty; }
 void navEtaClearDirty(void)   { g_etaDirty = false; }
@@ -565,6 +583,8 @@ bool navClockDirty(void) { return g_clockDirty; }
 void navClockClearDirty(void) { g_clockDirty = false; }
 bool navWeatherDirty(void) { return g_weatherDirty; }
 void navWeatherClearDirty(void) { g_weatherDirty = false; }
+bool navCameraDirty(void) { return g_cameraDirty; }
+void navCameraClearDirty(void) { g_cameraDirty = false; }
 
 void navSetGpsBroadcast(bool on) { gps_set_broadcast(on); }
 bool navGpsBroadcast(void) { return gps_broadcast_enabled(); }

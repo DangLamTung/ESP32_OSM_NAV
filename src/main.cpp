@@ -290,11 +290,12 @@ void loop()
         map_force_recompose();   /* redraw the continuation on a fresh world */
         s_mapDirty = true;
     }
-    if (navEtaDirty() || navClockDirty() || navWeatherDirty())
+    if (navEtaDirty() || navClockDirty() || navWeatherDirty() || navCameraDirty())
     {
         navEtaClearDirty();
         navClockClearDirty();
         navWeatherClearDirty();
+        navCameraClearDirty();
         s_mapDirty = true;
     }
     if (navPosDirty())

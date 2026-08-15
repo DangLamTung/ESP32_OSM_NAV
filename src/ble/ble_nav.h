@@ -14,6 +14,7 @@
  *   0x04 eta  : h(u8) m(u8) alen(u8) arrive (UTF-8)
  *   0x05 clock: h(u8) m(u8)
  *   0x08 nav2 : same payload as 0x03 — the maneuver AFTER the next one (for the 2-step HUD)
+ *   0x09 camera: dist(u16) type(u8) — speed camera ahead; dist=0 clears. type 0=fixed,1=mobile
  *   XML fallback: <route..> <nav..> <pos..> <eta..> <clock..> finalized on closing tag / 0x00
  */
 #ifndef BLE_NAV_H
@@ -73,6 +74,12 @@ typedef struct {
   char text[NAV_MAX_STREET];    // short label, e.g. "Sunny" / "Nắng"
 } NavWeather;
 
+typedef struct {
+  bool valid;
+  int  dist;                    // meters to the speed camera ahead (0 = none)
+  int  type;                    // 0 = fixed, 1 = mobile
+} NavCamera;
+
 void bleNavBegin(void);
 
 bool navConnected(void);
@@ -93,6 +100,8 @@ bool navClockDirty(void);
 void navClockClearDirty(void);
 bool navWeatherDirty(void);
 void navWeatherClearDirty(void);
+bool navCameraDirty(void);
+void navCameraClearDirty(void);
 
 const NavRoute*    navGetRoute(void);
 const NavRoute*    navGetRouteCont(void);   // route continuation (beyond path-ahead)
@@ -102,6 +111,7 @@ const NavPos*      navGetPos(void);
 const NavEta*      navGetEta(void);
 const NavClock*    navGetClock(void);
 const NavWeather*  navGetWeather(void);
+const NavCamera*   navGetCamera(void);
 
 /* --- weather service (phone -> ESP) --- */
 #define WEATHER_SERVICE_UUID "5a7e2000-2b2f-4f66-9f9a-5c0f8e1a2b3c"
