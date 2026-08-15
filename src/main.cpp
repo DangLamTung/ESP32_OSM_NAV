@@ -92,6 +92,7 @@ static void drawMap()
         mapSprite.fillScreen(0x2104);
         ui_draw_nav_hud(mapSprite);   /* drawTextOnlyHUD fills + draws text */
         ui_draw_buttons(&mapSprite);
+        routing_draw_overlay(mapSprite);   /* ROUTE button stays reachable in SIMPLE */
         map_push();
         s_pfFrame += (esp_timer_get_time() - t0);
         if (++s_pfFrames >= PERF_N_FRAMES) perfReport();

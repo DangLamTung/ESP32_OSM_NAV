@@ -263,6 +263,7 @@ static void routing_save_to_sd(void)
 {
   FILE *f = fopen("/sdcard/routing_selection.txt", "w");
   if (!f) { ESP_LOGE(TAG, "cannot open /sdcard/routing_selection.txt"); return; }
+  ESP_LOGI(TAG, "saving selection to /sdcard/routing_selection.txt");
   fprintf(f, "start %.6f %.6f\n", s_startLat, s_startLon);
   fprintf(f, "stop  %.6f %.6f\n", s_stopLat, s_stopLon);
   fclose(f);
@@ -278,9 +279,12 @@ bool routing_handle_tap(int x, int y)
         y >= ROUTE_BTN_Y && y < ROUTE_BTN_Y + ROUTE_BTN_H) {
       s_mode = ROUTE_PICK_START;
       s_pathN = 0;
+      /* routing needs the map: if we are in the text-only SIMPLE screen,
+       * switch to FULL so the crosshairs + path are visible */
+      if (ui_nav_mode() == UI_MODE_SIMPLE) ui_cycle_nav_mode();
       map_set_heading_up(false);   /* crosshair mapping assumes north-up */
       map_set_rotation(0);
-      Serial.println("[route] pick start (tap the map)");
+      ESP_LOGI(TAG, "pick start (tap the map)");
       ui_mark_redraw();
       return true;
     }
@@ -291,7 +295,7 @@ bool routing_handle_tap(int x, int y)
     s_startX = x; s_startY = y;
     map_screen_to_latlon(x, y, &s_startLat, &s_startLon);
     s_mode = ROUTE_PICK_STOP;
-    Serial.printf("[route] start %.6f,%.6f — pick stop\n", s_startLat, s_startLon);
+    ESP_LOGI(TAG, "start %.6f,%.6f - pick stop", s_startLat, s_startLon);
     ui_mark_redraw();
     return true;
   }
@@ -299,7 +303,7 @@ bool routing_handle_tap(int x, int y)
     s_stopX = x; s_stopY = y;
     map_screen_to_latlon(x, y, &s_stopLat, &s_stopLon);
     s_mode = ROUTE_CONFIRM;
-    Serial.printf("[route] stop %.6f,%.6f — confirm\n", s_stopLat, s_stopLon);
+    ESP_LOGI(TAG, "stop %.6f,%.6f - confirm", s_stopLat, s_stopLon);
     ui_mark_redraw();
     return true;
   }
@@ -315,6 +319,7 @@ bool routing_handle_tap(int x, int y)
       ui_mark_redraw();
       return true;
     }
+    ESP_LOGI(TAG, "confirm tap at (%d,%d) - hit Yes/No", x, y);
     return true;   /* consumed; must hit Yes/No */
   }
   /* ROUTE_DONE: any tap dismisses the path */
