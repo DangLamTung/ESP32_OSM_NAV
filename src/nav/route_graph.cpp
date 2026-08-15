@@ -32,6 +32,20 @@ static uint32_t  g_N = 0, g_E = 0;
 static int32_t   g_minlat = 0, g_minlon = 0, g_maxlat = 0, g_maxlon = 0;
 static bool      g_loaded = false;
 
+/* RNG2 window tracking (whole-country SD graph) */
+static bool      g_windowed = false;
+static double    g_winCenLat = 0, g_winCenLon = 0, g_winRad = 0;
+
+bool rg_is_windowed(void) { return g_windowed; }
+
+bool rg_window_covers(double lat, double lon, double marginDeg)
+{
+    if (!g_windowed)
+        return true;   /* whole-file graph covers everywhere */
+    double r = g_winRad + marginDeg;
+    return fabs(lat - g_winCenLat) <= r && fabs(lon - g_winCenLon) <= r;
+}
+
 /* ---- tap-snap cell index (PSRAM) ---- */
 #define CELL_DEG 0.0040            /* ~440 m cells */
 static uint16_t g_cellW = 0, g_cellH = 0;
@@ -186,6 +200,7 @@ static bool rg_load_rng1(FILE *fp, const char *path)
     g_N = N; g_E = E;
     g_cellFirst = cellFirst; g_cellNode = cellNode;
     g_loaded = true;
+    g_windowed = false;   /* RNG1 = whole file */
 
     size_t mb = ((size_t)N * 4 + N * 4 + (N + 1) * 4 + E * 4 + E * 2 +
                  cells * 4 + N * 4) / 1024 / 1024;
@@ -412,6 +427,8 @@ static bool rg_load_rng2(FILE *fp, const char *path)
     fclose(fp);
     g_N = M; g_E = gE;
     g_minlat = wMinLat; g_minlon = wMinLon; g_maxlat = wMaxLat; g_maxlon = wMaxLon;
+    g_windowed = true;
+    g_winCenLat = cLat; g_winCenLon = cLon; g_winRad = rad;
 
     /* ---- tap-snap cell index on the window ---- */
     g_cellW = (uint16_t)(((double)(g_maxlon - g_minlon) / 1e7) / CELL_DEG) + 1;
@@ -485,7 +502,7 @@ void rg_unload(void)
     g_lat = g_lon = NULL; g_first = NULL; g_to = NULL; g_w = NULL;
     g_cellFirst = NULL; g_cellNode = NULL;
     g_dist = g_f = NULL; g_prev = NULL; g_closed = NULL; g_heap = NULL; g_heapPos = NULL; s_rev = NULL;
-    g_N = g_E = 0; g_loaded = false;
+    g_N = g_E = 0; g_loaded = false; g_windowed = false;
 }
 
 /* ---- nearest node ---- */

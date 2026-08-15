@@ -18,6 +18,14 @@
 /* RNG2 windowed-loading radius (~0.06 deg) in km, announced in the routing UI. */
 #define ROUTE_WINDOW_RADIUS_KM 7
 
+/* true if the loaded graph is an RNG2 window (whole-country SD file) rather
+ * than a whole-file RNG1 — the window only covers the map centre at load. */
+bool rg_is_windowed(void);
+
+/* true if (lat,lon) is still inside the loaded window (or the graph is a
+ * whole-file RNG1). Used to decide when to reload the window on ROUTE press. */
+bool rg_window_covers(double lat, double lon, double marginDeg);
+
 /* Load /sdcard/<path> routing graph into PSRAM (coords + CSR + snap cell
  * index). Call rg_astar_init() afterwards to allocate the A* working arrays
  * (do that AFTER freeing the synthetic grid so they fit together). */

@@ -355,6 +355,27 @@ void routing_selftest(void)
 }
 
 /* ---------------- touch ---------------- */
+/* Reload the whole-country window around the current map centre so offline
+ * routing works wherever the user has panned to (the RNG2 window is only
+ * centred on the load-time map centre). No-op if it still covers us. */
+static void routing_reload_window(void)
+{
+  if (!s_useReal || !rg_is_windowed())
+    return;
+  if (rg_window_covers(centerLat, centerLon, 0.01))
+    return;   /* still inside the loaded window */
+  rg_unload();
+  if (rg_load("/sdcard/routing.rng") && rg_astar_init()) {
+    s_pathN = 0;
+    ESP_LOGI(TAG, "window reloaded around (%.4f,%.4f) - %u nodes",
+             centerLat, centerLon, (unsigned)rg_node_count());
+  } else {
+    rg_unload(); s_useReal = false; synthetic_alloc();
+    ESP_LOGE(TAG, "window reload failed - synthetic grid");
+  }
+  ui_mark_redraw();
+}
+
 bool routing_handle_tap(int x, int y)
 {
   ESP_LOGI(TAG, "tap(%d,%d) mode=%d", x, y, (int)s_mode);   /* DEBUG: watch taps */
@@ -362,6 +383,7 @@ bool routing_handle_tap(int x, int y)
     /* only the ROUTE button is consumed while idle */
     if (x >= ROUTE_BTN_X && x < ROUTE_BTN_X + ROUTE_BTN_W &&
         y >= ROUTE_BTN_Y && y < ROUTE_BTN_Y + ROUTE_BTN_H) {
+      routing_reload_window();   /* pan-to-anywhere support */
       s_mode = ROUTE_PICK_START;
       s_pathN = 0;
       grid_recenter();   /* box follows the car so taps land on distinct nodes */
@@ -401,6 +423,7 @@ bool routing_handle_tap(int x, int y)
    * tap cleared the path, so zooming in deleted the route. */
   if (x >= ROUTE_BTN_X && x < ROUTE_BTN_X + ROUTE_BTN_W &&
       y >= ROUTE_BTN_Y && y < ROUTE_BTN_Y + ROUTE_BTN_H) {
+    routing_reload_window();   /* pan-to-anywhere support */
     s_mode = ROUTE_PICK_START;
     s_pathN = 0;
     grid_recenter();
