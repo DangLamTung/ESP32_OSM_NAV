@@ -22,3 +22,6 @@
 # OS / editor
 .DS_Store
 Thumbs.db
+
+# large routing graph binaries (rebuilt via tools/)
+tools/graphs/*.rng

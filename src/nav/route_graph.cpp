@@ -9,6 +9,7 @@
  * 8 MB PSRAM after routing.cpp frees the synthetic grid.
  */
 #include "route_graph.h"
+#include "map_view.h"   /* centerLat / centerLon for the RNG2 window */
 
 #include <Arduino.h>
 #include <math.h>
@@ -86,6 +87,9 @@ static inline uint32_t nodeCell(double lat, double lon)
 }
 
 /* ---- load ---- */
+static bool rg_load_rng1(FILE *fp, const char *path);
+static bool rg_load_rng2(FILE *fp, const char *path);
+
 bool rg_load(const char *path)
 {
     if (g_loaded)
@@ -95,7 +99,24 @@ bool rg_load(const char *path)
         ESP_LOGW(TAG, "no %s — keeping synthetic grid", path);
         return false;
     }
+    char magic[4];
+    if (fread(magic, 1, 4, fp) != 4) {
+        fclose(fp);
+        return false;
+    }
+    fseek(fp, 0, SEEK_SET);
+    if (memcmp(magic, "RNG1", 4) == 0)
+        return rg_load_rng1(fp, path);
+    if (memcmp(magic, "RNG2", 4) == 0)
+        return rg_load_rng2(fp, path);
+    ESP_LOGE(TAG, "bad graph magic");
+    fclose(fp);
+    return false;
+}
 
+/* RNG1: small whole-file graph (single region). Loads everything into PSRAM. */
+static bool rg_load_rng1(FILE *fp, const char *path)
+{
     char magic[4];
     uint32_t ver = 0, N = 0, E = 0;
     int32_t minlat = 0, minlon = 0, maxlat = 0, maxlon = 0;
@@ -172,6 +193,258 @@ bool rg_load(const char *path)
              path, (unsigned)N, (unsigned)E, (double)mb,
              (double)minlat / 1e7, (double)maxlat / 1e7,
              (double)minlon / 1e7, (double)maxlon / 1e7);
+    return true;
+}
+
+/* RNG2: whole-country graph on SD — load only the cells covering the map
+ * centre as an active window in PSRAM (SD = memory, PSRAM = window).
+ *
+ * The file keeps nodes reordered by cell and edges sorted by (source node)
+ * so each cell's nodes AND edges are contiguous ranges we can fseek + fread.
+ * Loaded nodes get compact local ids; edges whose target is outside the
+ * window are dropped (the window is big enough that boundary effects are
+ * minor). */
+static bool rg_load_rng2(FILE *fp, const char *path)
+{
+    uint32_t ver = 0, N = 0, E = 0;
+    int32_t mnla = 0, mnlo = 0, mxla = 0, mxlo = 0;
+    uint32_t cell = 0;
+    uint16_t gw = 0, gh = 0;
+    if (fread(&ver, 4, 1, fp) != 1 || fread(&N, 4, 1, fp) != 1 ||
+        fread(&E, 4, 1, fp) != 1 || fread(&mnla, 4, 1, fp) != 1 ||
+        fread(&mnlo, 4, 1, fp) != 1 || fread(&mxla, 4, 1, fp) != 1 ||
+        fread(&mxlo, 4, 1, fp) != 1 || fread(&cell, 4, 1, fp) != 1 ||
+        fread(&gw, 2, 1, fp) != 1 || fread(&gh, 2, 1, fp) != 1 ||
+        ver != 1 || N == 0 || E == 0) {
+        ESP_LOGE(TAG, "bad RNG2 header");
+        fclose(fp);
+        return false;
+    }
+    uint64_t nCells = (uint64_t)gw * gh;
+    uint64_t latOff  = 40 + (nCells + 1) * 4;
+    uint64_t lonOff  = latOff + (uint64_t)N * 4;
+    uint64_t firstOff = lonOff + (uint64_t)N * 4;
+    uint64_t toOff   = firstOff + (uint64_t)(N + 1) * 4;
+    uint64_t wOff    = toOff + (uint64_t)E * 4;
+
+    /* covered cells around the map centre */
+    double cLat = centerLat, cLon = centerLon;
+    double rad = 0.06;   /* deg (~13 km box) */
+    int cx0 = (int)floor((cLon - rad - (double)mnlo / 1e7) / ((double)cell / 1e7));
+    int cx1 = (int)floor((cLon + rad - (double)mnlo / 1e7) / ((double)cell / 1e7));
+    int cy0 = (int)floor((cLat - rad - (double)mnla / 1e7) / ((double)cell / 1e7));
+    int cy1 = (int)floor((cLat + rad - (double)mnla / 1e7) / ((double)cell / 1e7));
+    if (cx0 < 0) { cx0 = 0; }
+    if (cx1 >= (int)gw) { cx1 = gw - 1; }
+    if (cy0 < 0) { cy0 = 0; }
+    if (cy1 >= (int)gh) { cy1 = gh - 1; }
+    int ncx = cx1 - cx0 + 1, ncy = cy1 - cy0 + 1;
+    int nCovered = ncx * ncy;
+    if (nCovered <= 0) {
+        ESP_LOGW(TAG, "RNG2: map centre outside graph bbox");
+        fclose(fp);
+        return false;
+    }
+
+    /* read cellNodeFirst per covered ROW (contiguous cols per row) */
+    uint32_t *cnf = (uint32_t *)heap_caps_malloc((uint32_t)(nCovered + ncy + 1) * 4,
+                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!cnf) { ESP_LOGE(TAG, "RNG2 cnf alloc failed"); fclose(fp); return false; }
+    {
+        uint32_t *rowCnf = (uint32_t *)heap_caps_malloc((uint32_t)(ncx + 1) * 4,
+                                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!rowCnf) { free(cnf); fclose(fp); ESP_LOGE(TAG, "RNG2 rowCnf alloc failed"); return false; }
+        for (int r = 0; r < ncy; r++) {
+            int cy = cy0 + r;
+            uint64_t off = 40 + ((uint64_t)cy * gw + cx0) * 4;
+            fseek(fp, (long)off, SEEK_SET);
+            if (fread(rowCnf, 4, ncx + 1, fp) != (size_t)(ncx + 1)) {
+                free(cnf); free(rowCnf); fclose(fp); ESP_LOGE(TAG, "RNG2 cnf read failed"); return false;
+            }
+            for (int c = 0; c <= ncx; c++)
+                cnf[r * (ncx + 1) + c] = rowCnf[c];
+        }
+        free(rowCnf);
+    }
+
+    /* old-id -> local-id via the covered cells' node ranges (disjoint, sorted) */
+    typedef struct { uint32_t start, count, base; } RngRange;
+    RngRange *ranges = (RngRange *)heap_caps_malloc((uint32_t)nCovered * sizeof(RngRange),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!ranges) { free(cnf); fclose(fp); ESP_LOGE(TAG, "RNG2 ranges alloc failed"); return false; }
+    uint32_t M = 0, keptEdges = 0;
+    for (int r = 0; r < ncy; r++) {
+        for (int c = 0; c < ncx; c++) {
+            uint32_t s = cnf[r * (ncx + 1) + c];
+            uint32_t e = cnf[r * (ncx + 1) + c + 1];
+            ranges[r * ncx + c].start = s;
+            ranges[r * ncx + c].count = e - s;
+            ranges[r * ncx + c].base = M;
+            M += e - s;
+        }
+    }
+
+    /* allocate local window arrays */
+    g_lat   = (int32_t *)heap_caps_malloc((size_t)M * 4, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    g_lon   = (int32_t *)heap_caps_malloc((size_t)M * 4, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    g_first = (uint32_t *)heap_caps_malloc((size_t)(M + 1) * 4, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!g_lat || !g_lon || !g_first) {
+        ESP_LOGE(TAG, "RNG2 node alloc failed (M=%u)", (unsigned)M);
+        rg_unload(); free(cnf); free(ranges); fclose(fp);
+        return false;
+    }
+
+    /* temp buffers for one cell's first[] + edge slice */
+    uint32_t *tFirst = (uint32_t *)heap_caps_malloc(4096 * 4, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint32_t *tTo    = (uint32_t *)heap_caps_malloc(65536 * 4, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint16_t *tW     = (uint16_t *)heap_caps_malloc(65536 * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!tFirst || !tTo || !tW) {
+        ESP_LOGE(TAG, "RNG2 temp alloc failed");
+        rg_unload(); free(cnf); free(ranges); free(tFirst); free(tTo); free(tW);
+        fclose(fp);
+        return false;
+    }
+
+    /* pass 1: count the window's edge slice so g_to/g_w are WINDOW-sized
+     * (allocating the whole-country E would OOM). */
+    uint64_t totalEdges = 0;
+    bool fail = false;
+    for (int r = 0; r < ncy && !fail; r++) {
+        for (int c = 0; c < ncx && !fail; c++) {
+            uint32_t s = cnf[r * (ncx + 1) + c];
+            uint32_t cnt = ranges[r * ncx + c].count;
+            if (cnt == 0)
+                continue;
+            if (cnt + 1 > 4096) { fail = true; break; }
+            fseek(fp, (long)(firstOff + (uint64_t)s * 4), SEEK_SET);
+            if (fread(tFirst, 4, cnt + 1, fp) != cnt + 1) { fail = true; break; }
+            totalEdges += (uint64_t)tFirst[cnt] - tFirst[0];
+        }
+    }
+    if (fail || totalEdges == 0 || totalEdges > 8000000) {
+        ESP_LOGE(TAG, "RNG2 edge-count pass failed (totalEdges=%llu)",
+                 (unsigned long long)totalEdges);
+        rg_unload(); free(cnf); free(ranges); free(tFirst); free(tTo); free(tW);
+        fclose(fp);
+        return false;
+    }
+    g_to = (uint32_t *)heap_caps_malloc((size_t)totalEdges * 4, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    g_w  = (uint16_t *)heap_caps_malloc((size_t)totalEdges * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!g_to || !g_w) {
+        ESP_LOGE(TAG, "RNG2 edge alloc failed (E=%llu)", (unsigned long long)totalEdges);
+        rg_unload(); free(cnf); free(ranges); free(tFirst); free(tTo); free(tW);
+        fclose(fp);
+        return false;
+    }
+
+    g_first[0] = 0;
+    uint32_t gE = 0;         /* kept edges so far */
+    int32_t wMinLat = INT32_MAX, wMinLon = INT32_MAX, wMaxLat = INT32_MIN, wMaxLon = INT32_MIN;
+
+    for (int r = 0; r < ncy && !fail; r++) {
+        for (int c = 0; c < ncx && !fail; c++) {
+            uint32_t s = cnf[r * (ncx + 1) + c];      /* old node id range start */
+            uint32_t cnt = ranges[r * ncx + c].count; /* nodes in this cell */
+            uint32_t base = ranges[r * ncx + c].base;
+            if (cnt == 0)
+                continue;
+
+            /* node coords */
+            fseek(fp, (long)(latOff + (uint64_t)s * 4), SEEK_SET);
+            if (fread(g_lat + base, 4, cnt, fp) != cnt) { fail = true; break; }
+            fseek(fp, (long)(lonOff + (uint64_t)s * 4), SEEK_SET);
+            if (fread(g_lon + base, 4, cnt, fp) != cnt) { fail = true; break; }
+
+            /* first[] for these nodes (cnt+1 entries) */
+            if (cnt + 1 > 4096) { ESP_LOGE(TAG, "cell too big"); fail = true; break; }
+            fseek(fp, (long)(firstOff + (uint64_t)s * 4), SEEK_SET);
+            if (fread(tFirst, 4, cnt + 1, fp) != cnt + 1) { fail = true; break; }
+            uint32_t e0 = tFirst[0];
+            uint32_t e1 = tFirst[cnt];
+            uint32_t eN = e1 - e0;
+            if (eN > 65536) { ESP_LOGE(TAG, "cell edges too big"); fail = true; break; }
+            fseek(fp, (long)(toOff + (uint64_t)e0 * 4), SEEK_SET);
+            if (fread(tTo, 4, eN, fp) != eN) { fail = true; break; }
+            fseek(fp, (long)(wOff + (uint64_t)e0 * 2), SEEK_SET);
+            if (fread(tW, 2, eN, fp) != eN) { fail = true; break; }
+
+            /* for each node in this cell, copy its edges, remapping targets */
+            for (uint32_t j = 0; j < cnt && !fail; j++) {
+                uint32_t loc = base + j;
+                uint32_t row0 = tFirst[j] - e0, row1 = tFirst[j + 1] - e0;
+                for (uint32_t k = row0; k < row1; k++) {
+                    uint32_t tgt = tTo[k];
+                    /* binary search target in covered ranges */
+                    int lo = 0, hi = nCovered - 1, found = -1;
+                    while (lo <= hi) {
+                        int mid = (lo + hi) / 2;
+                        if (tgt < ranges[mid].start) hi = mid - 1;
+                        else if (tgt >= ranges[mid].start + ranges[mid].count) lo = mid + 1;
+                        else { found = mid; break; }
+                    }
+                    if (found < 0)
+                        continue;   /* target outside window -> drop edge */
+                    uint32_t tl = ranges[found].base + (tgt - ranges[found].start);
+                    g_to[gE] = tl;
+                    g_w[gE] = tW[k];
+                    gE++;
+                }
+                g_first[loc + 1] = gE;
+            }
+
+            /* window bbox (for the snap index) */
+            for (uint32_t j = 0; j < cnt && !fail; j++) {
+                int32_t la = g_lat[base + j], lo2 = g_lon[base + j];
+                if (la < wMinLat) { wMinLat = la; }
+                if (la > wMaxLat) { wMaxLat = la; }
+                if (lo2 < wMinLon) { wMinLon = lo2; }
+                if (lo2 > wMaxLon) { wMaxLon = lo2; }
+            }
+        }
+    }
+
+    free(tFirst); free(tTo); free(tW); free(cnf); free(ranges);
+    if (fail) {
+        ESP_LOGE(TAG, "RNG2 read failed");
+        rg_unload(); fclose(fp);
+        return false;
+    }
+    fclose(fp);
+    g_N = M; g_E = gE;
+    g_minlat = wMinLat; g_minlon = wMinLon; g_maxlat = wMaxLat; g_maxlon = wMaxLon;
+
+    /* ---- tap-snap cell index on the window ---- */
+    g_cellW = (uint16_t)(((double)(g_maxlon - g_minlon) / 1e7) / CELL_DEG) + 1;
+    g_cellH = (uint16_t)(((double)(g_maxlat - g_minlat) / 1e7) / CELL_DEG) + 1;
+    uint32_t cells = (uint32_t)g_cellW * g_cellH;
+    g_cellFirst = (uint32_t *)heap_caps_calloc(cells + 1, 4, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    g_cellNode  = (uint32_t *)heap_caps_malloc((size_t)M * 4, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!g_cellFirst || !g_cellNode) {
+        ESP_LOGE(TAG, "RNG2 snap index alloc failed");
+        rg_unload();
+        return false;
+    }
+    for (uint32_t i = 0; i < M; i++)
+        g_cellFirst[nodeCell((double)g_lat[i] / 1e7, (double)g_lon[i] / 1e7) + 1]++;
+    for (uint32_t c = 0; c < cells; c++)
+        g_cellFirst[c + 1] += g_cellFirst[c];
+    {
+        uint32_t *cur = (uint32_t *)heap_caps_malloc(cells * 4, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        memcpy(cur, g_cellFirst, cells * 4);
+        for (uint32_t i = 0; i < M; i++) {
+            uint32_t c = nodeCell((double)g_lat[i] / 1e7, (double)g_lon[i] / 1e7);
+            g_cellNode[cur[c]++] = i;
+        }
+        free(cur);
+    }
+    g_loaded = true;
+
+    size_t mb = ((size_t)M * 4 + M * 4 + (M + 1) * 4 + gE * 4 + gE * 2 +
+                 cells * 4 + M * 4) / 1024 / 1024;
+    ESP_LOGI(TAG, "window loaded %s: N=%u E=%u (%.1f MB) bbox %.5f..%.5f / %.5f..%.5f",
+             path, (unsigned)M, (unsigned)gE, (double)mb,
+             (double)g_minlat / 1e7, (double)g_maxlat / 1e7,
+             (double)g_minlon / 1e7, (double)g_maxlon / 1e7);
     return true;
 }
 
