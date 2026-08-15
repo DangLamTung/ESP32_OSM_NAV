@@ -223,6 +223,16 @@ void map_screen_to_latlon(int sx, int sy, double *lat, double *lon)
     *lat = wy2lat(wy, ZOOM);
 }
 
+/* Inverse of map_screen_to_latlon (north-up). Used by the routing overlay to
+ * draw the computed path / markers screen-fixed without a world recompose. */
+void map_latlon_to_screen(double lat, double lon, int *sx, int *sy)
+{
+    double wx = lon2wx(lon, ZOOM);
+    double wy = lat2wy(lat, ZOOM);
+    *sx = (int)lround(wx - (MAP_WORLD_SIZE - SCREEN_W) / 2.0 - s_offX);
+    *sy = (int)lround(wy - (MAP_WORLD_SIZE - SCREEN_H) / 2.0 - s_offY);
+}
+
 void map_pan(int dx, int dy)
 {
     if (!dx && !dy) return;

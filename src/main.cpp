@@ -107,10 +107,9 @@ static void drawMap()
     uint32_t t1 = esp_timer_get_time();
     /* redraw the route only when the world was recomposed (it's static on
      * the world between composes; the car marker is drawn screen-fixed) */
-    if (map_world_changed()) {
+    if (map_world_changed())
         ui_draw_nav_route(mapWorld, map_ref_lon(), map_ref_lat(), ZOOM);
-        routing_draw_world(mapWorld, map_ref_lon(), map_ref_lat(), ZOOM);
-    }
+    /* the routing path is drawn screen-fixed in routing_draw_overlay below */
     uint32_t t2 = esp_timer_get_time();
     map_render();
     uint32_t t3 = esp_timer_get_time();
@@ -220,7 +219,8 @@ void setup()
     navSetGpsBroadcast(GPS_BROADCAST_DEFAULT);
 
     map_init();
-    routing_init();   /* offline-routing prototype: build the test grid graph */
+    routing_init();      /* offline-routing prototype: build the test grid graph */
+    routing_selftest();  /* log real on-device A* timing (corner-to-corner) */
 
     /* arm wake-on-touch (FT6336 INT) regardless of WiFi outcome */
     power_mgr_init();

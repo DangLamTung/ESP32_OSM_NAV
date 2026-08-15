@@ -38,6 +38,7 @@ void  map_preload(void);            /* warm the tile cache ahead of the car (thr
 void  map_render(void);             /* rotate mapWorld -> mapSprite (no tile fetch) */
 void  map_push(void);               /* pushSprite(0,0) */
 void  map_screen_to_latlon(int sx, int sy, double *lat, double *lon);  /* screen tap -> geo (north-up) */
+void  map_latlon_to_screen(double lat, double lon, int *sx, int *sy);  /* geo -> screen (north-up) */
 void  map_pan(int dx, int dy);      /* pan by pixel delta (Mercator) */
 void  map_zoom(int dir);            /* +1 / -1, clamped to [ZOOM_MIN, ZOOM_MAX] */
 void  map_cycle_tile_mode(void);    /* AUTO -> SD -> NET -> AUTO */

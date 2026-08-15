@@ -18,6 +18,10 @@
 /* Build the test grid graph in PSRAM. Call once from setup(). */
 void routing_init(void);
 
+/* Boot self-test: run A* across the full grid and log visited/time/mem.
+ * Validates the engine on-device without needing the touch UI. */
+void routing_selftest(void);
+
 /* Tap handler for the routing state machine. Returns true if the tap was
  * consumed (button / crosshair pick / confirm dialog). */
 bool routing_handle_tap(int x, int y);

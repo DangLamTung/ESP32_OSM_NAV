@@ -253,9 +253,19 @@ static bool routing_compute(void)
   ESP_LOGI(TAG, "A* done: visited=%u time=%ums path=%dpts dist=%um sram=%u",
            (unsigned)visited, (unsigned)ms, s_pathN, (unsigned)meters,
            (unsigned)esp_get_free_heap_size());
-  map_force_recompose();   /* redraw the world so the path appears */
-  ui_mark_redraw();
+  ui_mark_redraw();   /* path is drawn screen-fixed in the overlay -> no recompose */
   return true;
+}
+
+/* Boot self-test: A* corner-to-corner of the test grid box, logs the real
+ * on-device timing/memory so we can validate the engine without the UI. */
+void routing_selftest(void)
+{
+  s_startLat = GRID_LAT0 + 0.001; s_startLon = GRID_LON0 + 0.001;
+  s_stopLat  = GRID_LAT1 - 0.001; s_stopLon  = GRID_LON1 - 0.001;
+  ESP_LOGI(TAG, "selftest: A* corner-to-corner of the %.1fkm x %.1fkm box",
+           (GRID_LON1 - GRID_LON0) * 109.3, (GRID_LAT1 - GRID_LAT0) * 111.3);
+  routing_compute();
 }
 
 /* ---------------- SD save ---------------- */
@@ -331,17 +341,52 @@ bool routing_handle_tap(int x, int y)
 
 /* ---------------- drawing ---------------- */
 static void drawCrosshair(LGFX_Sprite &spr, int x, int y, uint16_t col) {
-  const int r = 10;
+  const int r = 18;                      /* big + obvious */
   spr.drawCircle(x, y, r, col);
-  spr.drawLine(x - r - 4, y, x - r, y, col);
-  spr.drawLine(x + r, y, x + r + 4, y, col);
-  spr.drawLine(x, y - r - 4, x, y - r, col);
-  spr.drawLine(x, y + r, x, y + r + 4, col);
+  spr.drawCircle(x, y, r - 2, col);      /* thicker ring */
+  spr.drawLine(x - r - 6, y, x - r, y, col);   /* long arms */
+  spr.drawLine(x + r, y, x + r + 6, y, col);
+  spr.drawLine(x, y - r - 6, x, y - r, col);
+  spr.drawLine(x, y + r, x, y + r + 6, col);
+  spr.fillCircle(x, y, 3, TFT_WHITE);    /* bright centre dot */
+}
+
+static void drawStatus(LGFX_Sprite &spr, const char *txt) {
+  spr.setTextFont(1);
+  spr.setTextColor(TFT_WHITE, 0x2104);
+  int w = spr.textWidth(txt);
+  spr.fillRect(SCREEN_W / 2 - w / 2 - 8, 2, w + 16, 15, 0x2104);
+  spr.drawRect(SCREEN_W / 2 - w / 2 - 8, 2, w + 16, 15, 0x39E7);
+  spr.setCursor(SCREEN_W / 2 - w / 2, 5);
+  spr.print(txt);
+}
+
+/* draw the computed path + start/stop markers screen-fixed (always visible) */
+static void drawPathOverlay(LGFX_Sprite &spr) {
+  if (s_pathN >= 2) {
+    int px = 0, py = 0;
+    for (int i = 0; i < s_pathN; i++) {
+      int sx, sy;
+      map_latlon_to_screen(s_path[i].lat, s_path[i].lon, &sx, &sy);
+      if (i > 0) {
+        spr.drawWideLine(px, py, sx, sy, 4.0f, 0xF81F);   /* magenta halo */
+        spr.drawWideLine(px, py, sx, sy, 2.0f, TFT_WHITE);/* white core */
+      }
+      px = sx; py = sy;
+    }
+  }
+  int sx, sy;
+  map_latlon_to_screen(s_startLat, s_startLon, &sx, &sy);
+  spr.fillCircle(sx, sy, 5, TFT_GREEN);
+  spr.drawCircle(sx, sy, 7, TFT_WHITE);
+  map_latlon_to_screen(s_stopLat, s_stopLon, &sx, &sy);
+  spr.fillCircle(sx, sy, 5, TFT_RED);
+  spr.drawCircle(sx, sy, 7, TFT_WHITE);
 }
 
 void routing_draw_overlay(LGFX_Sprite &spr)
 {
-  /* ROUTE button (always visible in FULL mode) */
+  /* ROUTE button (always visible) */
   uint16_t bg = (s_mode != ROUTE_IDLE) ? spr.color565(40, 150, 70) : spr.color565(70, 74, 82);
   spr.fillRoundRect(ROUTE_BTN_X, ROUTE_BTN_Y, ROUTE_BTN_W, ROUTE_BTN_H, 4, bg);
   spr.drawRoundRect(ROUTE_BTN_X, ROUTE_BTN_Y, ROUTE_BTN_W, ROUTE_BTN_H, 4, TFT_BLACK);
@@ -351,16 +396,19 @@ void routing_draw_overlay(LGFX_Sprite &spr)
   spr.print("ROUTE");
   spr.setTextFont(1);
 
-  if (s_mode == ROUTE_PICK_START) return;
-
-  if (s_mode == ROUTE_PICK_STOP) {
+  switch (s_mode) {
+  case ROUTE_PICK_START:
+    drawStatus(spr, "PICK START");
+    return;
+  case ROUTE_PICK_STOP:
+    drawStatus(spr, "PICK STOP");
     if (s_startX >= 0) drawCrosshair(spr, s_startX, s_startY, TFT_GREEN);
     return;
-  }
-  if (s_mode == ROUTE_CONFIRM) {
+  case ROUTE_CONFIRM: {
+    drawStatus(spr, "CONFIRM");
+    drawPathOverlay(spr);   /* preview the route before confirming */
     if (s_startX >= 0) drawCrosshair(spr, s_startX, s_startY, TFT_GREEN);
     if (s_stopX >= 0)  drawCrosshair(spr, s_stopX,  s_stopY,  TFT_RED);
-    /* confirm dialog */
     const uint16_t dlg = spr.color565(22, 24, 30);
     spr.fillRoundRect(PROMPT_X, PROMPT_Y, PROMPT_W, PROMPT_H, 6, dlg);
     spr.drawRoundRect(PROMPT_X, PROMPT_Y, PROMPT_W, PROMPT_H, 6, TFT_WHITE);
@@ -368,7 +416,6 @@ void routing_draw_overlay(LGFX_Sprite &spr)
     spr.setTextFont(2);
     spr.setCursor(PROMPT_X + 20, PROMPT_Y + 8);
     spr.print("Add path?");
-    /* Yes (green) / No (red) */
     spr.fillRoundRect(YES_X, YES_Y, YES_W, YES_H, 4, spr.color565(40, 150, 70));
     spr.setTextColor(TFT_WHITE, spr.color565(40, 150, 70));
     spr.setCursor(YES_X + 20, YES_Y + 5);
@@ -380,18 +427,14 @@ void routing_draw_overlay(LGFX_Sprite &spr)
     spr.setTextFont(1);
     return;
   }
-  if (s_mode == ROUTE_DONE) {
-    /* brief result tag bottom-center */
+  case ROUTE_DONE: {
     char tag[48];
-    snprintf(tag, sizeof tag, "%u pts  %u ms  %u m", s_pathN, (unsigned)s_lastMs, (unsigned)s_lastDistM);
-    uint16_t bg2 = spr.color565(20, 26, 34);
-    int w = spr.textWidth(tag);
-    spr.fillRoundRect(SCREEN_W / 2 - w / 2 - 8, SCREEN_H - 60, w + 16, 20, 4, bg2);
-    spr.setTextColor(TFT_WHITE, bg2);
-    spr.setTextFont(1);
-    spr.setCursor(SCREEN_W / 2 - w / 2, SCREEN_H - 56);
-    spr.print(tag);
-    spr.setTextFont(1);
+    snprintf(tag, sizeof tag, "ROUTED %u pts  %u ms  %u m", s_pathN, (unsigned)s_lastMs, (unsigned)s_lastDistM);
+    drawStatus(spr, tag);
+    drawPathOverlay(spr);   /* keep the path + markers visible */
+    return;
+  }
+  default:
     return;
   }
 }
