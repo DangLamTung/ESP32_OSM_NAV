@@ -221,6 +221,8 @@ static bool rg_load_rng1(FILE *fp, const char *path)
  * minor). */
 static bool rg_load_rng2(FILE *fp, const char *path)
 {
+    /* the dispatcher already read the 4-byte magic and seeked to 0; skip it */
+    fseek(fp, 4, SEEK_SET);
     uint32_t ver = 0, N = 0, E = 0;
     int32_t mnla = 0, mnlo = 0, mxla = 0, mxlo = 0;
     uint32_t cell = 0;

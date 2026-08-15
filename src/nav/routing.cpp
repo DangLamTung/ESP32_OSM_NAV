@@ -376,6 +376,28 @@ static void routing_reload_window(void)
   ui_mark_redraw();
 }
 
+/* true if (x,y) is on a control button — such taps must NOT place a crosshair
+ * during pick mode; they fall through to the button handler instead. */
+static bool routing_tap_on_button(int x, int y)
+{
+  if (x >= ROUTE_BTN_X && x < ROUTE_BTN_X + ROUTE_BTN_W &&
+      y >= ROUTE_BTN_Y && y < ROUTE_BTN_Y + ROUTE_BTN_H) return true;
+  if (x >= ROTATE_BTN_X && x < ROTATE_BTN_X + ROTATE_BTN_W &&
+      y >= ROTATE_BTN_Y && y < ROTATE_BTN_Y + ROTATE_BTN_H) return true;
+  if (x >= HDG_BTN_X && x < HDG_BTN_X + HDG_BTN_W &&
+      y >= HDG_BTN_Y && y < HDG_BTN_Y + HDG_BTN_H) return true;
+  if (x >= CENTER_BTN_X && x < CENTER_BTN_X + CENTER_BTN_W &&
+      y >= CENTER_BTN_Y && y < CENTER_BTN_Y + CENTER_BTN_H) return true;
+  if (x >= GEAR_BTN_X && x < GEAR_BTN_X + GEAR_BTN_W &&
+      y >= GEAR_BTN_Y && y < GEAR_BTN_Y + GEAR_BTN_H) return true;
+  if (x >= ZOOM_IN_X && x < ZOOM_IN_X + ZOOM_BTN_W &&
+      y >= ZOOM_IN_Y && y < ZOOM_IN_Y + ZOOM_BTN_H) return true;
+  if (x >= ZOOM_OUT_X && x < ZOOM_OUT_X + ZOOM_BTN_W &&
+      y >= ZOOM_OUT_Y && y < ZOOM_OUT_Y + ZOOM_BTN_H) return true;
+  if (ui_settings_open()) return true;   /* the whole settings panel is controls */
+  return false;
+}
+
 bool routing_handle_tap(int x, int y)
 {
   ESP_LOGI(TAG, "tap(%d,%d) mode=%d", x, y, (int)s_mode);   /* DEBUG: watch taps */
@@ -401,6 +423,7 @@ bool routing_handle_tap(int x, int y)
   }
 
   if (s_mode == ROUTE_PICK_START) {
+    if (routing_tap_on_button(x, y)) return false;   /* don't pick on a button */
     s_startX = x; s_startY = y;
     map_screen_to_latlon(x, y, &s_startLat, &s_startLon);
     s_mode = ROUTE_PICK_STOP;
@@ -409,6 +432,7 @@ bool routing_handle_tap(int x, int y)
     return true;
   }
   if (s_mode == ROUTE_PICK_STOP) {
+    if (routing_tap_on_button(x, y)) return false;   /* don't pick on a button */
     s_stopX = x; s_stopY = y;
     map_screen_to_latlon(x, y, &s_stopLat, &s_stopLon);
     ESP_LOGI(TAG, "stop %.6f,%.6f - computing", s_stopLat, s_stopLon);
