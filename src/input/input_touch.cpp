@@ -15,6 +15,7 @@
 #include "display_panel.h"
 #include "map_view.h"
 #include "ui_controls.h"
+#include "routing.h"
 #include "power_mgr.h"
 #include <Arduino.h>
 #include "esp_log.h"
@@ -32,6 +33,11 @@ static const int DRAG_THRESHOLD = 6;   /* px; finger must move this far to pan *
 /* hit-test buttons at tap position (x, y); returns true if consumed */
 static bool handleTap(int x, int y)
 {
+    /* offline-routing crosshair mode consumes taps first (button / picks /
+     * confirm dialog). In ROUTE_IDLE only its own button is consumed. */
+    if (routing_handle_tap(x, y))
+        return true;
+
     /* settings panel consumes taps inside/around it first */
     if (ui_settings_open())
         return ui_settings_tap(x, y);

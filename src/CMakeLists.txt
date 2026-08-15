@@ -22,6 +22,7 @@ idf_component_register(
         "ui/ui_buttons.cpp"
         "ui/ui_splash.cpp"
         "input/input_touch.cpp"
+        "nav/routing.cpp"
         "power/power_mgr.cpp"
         "ble/ble_nav.cpp"
         "ble/ble_scan.cpp"
@@ -40,6 +41,7 @@ idf_component_register(
         "gps"
         "net"
         "sd"
+        "nav"
     REQUIRES
         espressif__arduino-esp32
         LovyanGFX

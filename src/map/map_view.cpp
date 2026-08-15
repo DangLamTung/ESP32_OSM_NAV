@@ -212,6 +212,17 @@ void map_push(void)
     mapSprite.pushSprite(0, 0);
 }
 
+/* Screen tap -> geographic (lat/lon) for the offline-routing crosshair picks.
+ * Inverts the north-up blit (world window offset by s_offX/Y) via the Web
+ * Mercator inverse. Assumes rotation 0 (the routing UI forces north-up). */
+void map_screen_to_latlon(int sx, int sy, double *lat, double *lon)
+{
+    double wx = sx + (MAP_WORLD_SIZE - SCREEN_W) / 2.0 + s_offX;
+    double wy = sy + (MAP_WORLD_SIZE - SCREEN_H) / 2.0 + s_offY;
+    *lon = wx2lon(wx, ZOOM);
+    *lat = wy2lat(wy, ZOOM);
+}
+
 void map_pan(int dx, int dy)
 {
     if (!dx && !dy) return;

@@ -27,6 +27,7 @@
 #include "gps_ublox.h"
 #include "sd_card.h"
 #include "sd_upload.h"
+#include "routing.h"
 #include "esp_log.h"
 #include "esp_system.h"   /* esp_restart() */
 #include "esp_timer.h"    /* esp_timer_get_time() — perf measurement */
@@ -105,8 +106,10 @@ static void drawMap()
     uint32_t t1 = esp_timer_get_time();
     /* redraw the route only when the world was recomposed (it's static on
      * the world between composes; the car marker is drawn screen-fixed) */
-    if (map_world_changed())
+    if (map_world_changed()) {
         ui_draw_nav_route(mapWorld, map_ref_lon(), map_ref_lat(), ZOOM);
+        routing_draw_world(mapWorld, map_ref_lon(), map_ref_lat(), ZOOM);
+    }
     uint32_t t2 = esp_timer_get_time();
     map_render();
     uint32_t t3 = esp_timer_get_time();
@@ -114,6 +117,7 @@ static void drawMap()
     ui_draw_nav_hud(mapSprite);
     uint32_t t4 = esp_timer_get_time();
     ui_draw_buttons(&mapSprite);   /* buttons composed into the frame -> no flicker */
+    routing_draw_overlay(mapSprite);   /* ROUTE btn + crosshairs + prompt + path stats */
     uint32_t t5 = esp_timer_get_time();
     map_push();
     uint32_t t6 = esp_timer_get_time();
@@ -215,6 +219,7 @@ void setup()
     navSetGpsBroadcast(GPS_BROADCAST_DEFAULT);
 
     map_init();
+    routing_init();   /* offline-routing prototype: build the test grid graph */
 
     /* arm wake-on-touch (FT6336 INT) regardless of WiFi outcome */
     power_mgr_init();
