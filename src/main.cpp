@@ -282,8 +282,9 @@ void loop()
         navRouteClearDirty();
         navManeuverClearDirty();
         /* a new route = navigation started: auto-rotate to heading-up so the
-         * map follows the road (user can still toggle with the H button) */
-        if (routeNew)
+         * map follows the road (user can still toggle with the H button).
+         * Keep the map north-up while offline-routing is active. */
+        if (routeNew && !routing_active())
         {
             map_set_heading_up(true);
             map_force_recompose();   /* redraw the new route on a fresh world */
@@ -312,8 +313,10 @@ void loop()
         {
             /* record the fix for smooth-follow interpolation */
             map_set_fix(p->lat, p->lon);
-            /* heading-up mode: rotate the map so travel direction points up */
-            map_apply_heading(p->hdg);
+            /* heading-up mode: rotate the map so travel direction points up
+             * (held north-up while offline-routing is active) */
+            if (!routing_active())
+                map_apply_heading(p->hdg);
             s_mapDirty = true;
         }
     }

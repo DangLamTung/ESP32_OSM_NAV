@@ -23,6 +23,7 @@ idf_component_register(
         "ui/ui_splash.cpp"
         "input/input_touch.cpp"
         "nav/routing.cpp"
+        "nav/route_graph.cpp"
         "power/power_mgr.cpp"
         "ble/ble_nav.cpp"
         "ble/ble_scan.cpp"

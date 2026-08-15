@@ -13,6 +13,7 @@
  *     No  -> save start/stop to /sdcard/routing_selection.txt and exit
  */
 #include "routing.h"
+#include "route_graph.h"      /* real OSM road graph (.rng from SD) */
 #include "app_config.h"      /* SCREEN_W/H, MAP_CENTER_* */
 #include "map_view.h"        /* map_screen_to_latlon, map_force_recompose, map_set_* */
 #include "ui_controls.h"     /* ui_mark_redraw() */
@@ -33,20 +34,6 @@ static const char *TAG = "route";
 #define ROUTE_BTN_W 44
 #define ROUTE_BTN_H 36
 
-/* ---- confirm dialog ---- */
-#define PROMPT_X 60
-#define PROMPT_Y 88
-#define PROMPT_W 200
-#define PROMPT_H 64
-#define YES_X (PROMPT_X + 16)
-#define YES_Y (PROMPT_Y + 34)
-#define YES_W 72
-#define YES_H 22
-#define NO_X  (PROMPT_X + PROMPT_W - 16 - 72)
-#define NO_Y  (PROMPT_Y + 34)
-#define NO_W  72
-#define NO_H  22
-
 /* ---- synthetic test grid (box centred on the CURRENT map centre so taps
  *      always land inside it — start/stop stay distinct) ---- */
 #define GRID_W 240
@@ -60,7 +47,10 @@ static double g_lat0, g_lat1, g_lon0, g_lon1;   /* grid box (re-centred on the c
 #define ROUTE_COL_START 0x07FF
 #define ROUTE_COL_STOP  0xFFE0
 
-static enum { ROUTE_IDLE, ROUTE_PICK_START, ROUTE_PICK_STOP, ROUTE_CONFIRM, ROUTE_DONE } s_mode = ROUTE_IDLE;
+static enum { ROUTE_IDLE, ROUTE_PICK_START, ROUTE_PICK_STOP, ROUTE_DONE } s_mode = ROUTE_IDLE;
+static bool s_useReal = false;   /* real OSM graph loaded (else synthetic grid) */
+
+bool routing_active(void) { return s_mode != ROUTE_IDLE; }
 
 static double s_startLat, s_startLon, s_stopLat, s_stopLon;
 static int    s_startX = -1, s_startY = -1, s_stopX = -1, s_stopY = -1;
@@ -68,6 +58,7 @@ static int    s_startX = -1, s_startY = -1, s_stopX = -1, s_stopY = -1;
 static struct { double lat, lon; } s_path[MAX_PATH_PTS];
 static int s_pathN = 0;
 static uint32_t s_lastVisited = 0, s_lastMs = 0, s_lastDistM = 0;
+static double *s_rlat = NULL, *s_rlon = NULL;   /* real-graph path scratch (PSRAM) */
 
 /* ---- A* arrays (PSRAM) ---- */
 static uint32_t *g_dist;      /* g score (cost units) */
@@ -131,6 +122,26 @@ void routing_init(void)
            GRID_W, GRID_H, (unsigned)GRID_N,
            (double)(GRID_N * (4 + 4 + 4 + 1 + 4 + 4)) / 1024.0,
            (g_lon1 - g_lon0) * 109.3, (g_lat1 - g_lat0) * 111.3);
+
+  /* try the REAL OSM road graph from SD; on success free the synthetic grid
+   * (it was only for validating the engine) to make room for the real one. */
+  s_rlat = (double *)heap_caps_malloc(MAX_PATH_PTS * sizeof(double), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  s_rlon = (double *)heap_caps_malloc(MAX_PATH_PTS * sizeof(double), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!s_rlat) s_rlat = (double *)malloc(MAX_PATH_PTS * sizeof(double));
+  if (!s_rlon) s_rlon = (double *)malloc(MAX_PATH_PTS * sizeof(double));
+  if (rg_load("/sdcard/routing.rng")) {
+    /* free the synthetic grid FIRST so the real A* arrays fit in PSRAM */
+    free(g_dist); free(g_f); free(g_prev); free(g_closed); free(g_heap); free(g_heapPos);
+    g_dist = NULL; g_f = NULL; g_prev = NULL; g_heap = NULL; g_heapPos = NULL; g_closed = NULL;
+    if (rg_astar_init()) {
+      s_useReal = true;
+      ESP_LOGI(TAG, "real graph active (%u nodes)", (unsigned)rg_node_count());
+    } else {
+      /* not enough PSRAM for A*: give the graph back, keep the synthetic grid */
+      rg_unload();
+      ESP_LOGE(TAG, "not enough PSRAM for real A* - keeping synthetic grid");
+    }
+  }
 }
 
 /* ---------------- binary heap (min by g_f, decrease-key) ---------------- */
@@ -177,6 +188,27 @@ static void heapDecreaseKey(int32_t node) {
 /* ---------------- A* ---------------- */
 static bool routing_compute(void)
 {
+  /* ---- real OSM road network (from SD) ---- */
+  if (s_useReal) {
+    double distM = 0.0;
+    uint32_t ms = 0;
+    int n = rg_route(s_startLat, s_startLon, s_stopLat, s_stopLon,
+                     s_rlat, s_rlon, MAX_PATH_PTS, &distM, &ms);
+    s_lastDistM = (uint32_t)lround(distM);
+    s_lastMs = ms;
+    s_pathN = 0;
+    for (int i = 0; i < n && i < MAX_PATH_PTS; i++) {
+      s_path[i].lat = s_rlat[i]; s_path[i].lon = s_rlon[i]; s_pathN++;
+    }
+    s_lastVisited = 0;
+    if (s_pathN >= 1) {
+      ui_mark_redraw();   /* path drawn screen-fixed in the overlay */
+      return true;
+    }
+    return false;
+  }
+
+  /* ---- synthetic test grid (fallback) ---- */
   int sCol = colOf(s_startLon), sRow = rowOf(s_startLat);
   int tCol = colOf(s_stopLon),  tRow = rowOf(s_stopLat);
   int start = idx(sCol, sRow), stop = idx(tCol, tRow);
@@ -275,23 +307,23 @@ static bool routing_compute(void)
  * on-device timing/memory so we can validate the engine without the UI. */
 void routing_selftest(void)
 {
-  s_startLat = g_lat0 + 0.001; s_startLon = g_lon0 + 0.001;
-  s_stopLat  = g_lat1 - 0.001; s_stopLon  = g_lon1 - 0.001;
-  ESP_LOGI(TAG, "selftest: A* corner-to-corner of the %.1fkm x %.1fkm box",
-           (g_lon1 - g_lon0) * 109.3, (g_lat1 - g_lat0) * 111.3);
+  if (s_useReal) {
+    /* route between two CENTRAL points (35% / 65% across the box) so both
+     * ends are in the main connected component — corner-to-corner can hit
+     * bbox-truncation islands and report a bogus no-path. */
+    double mnla, mnlo, mxla, mxlo;
+    rg_bbox(&mnla, &mnlo, &mxla, &mxlo);
+    s_startLat = mnla + (mxla - mnla) * 0.35; s_startLon = mnlo + (mxlo - mnlo) * 0.35;
+    s_stopLat  = mnla + (mxla - mnla) * 0.65; s_stopLon  = mnlo + (mxlo - mnlo) * 0.65;
+    ESP_LOGI(TAG, "selftest: real graph center route (%.4f,%.4f)->(%.4f,%.4f)",
+             s_startLat, s_startLon, s_stopLat, s_stopLon);
+  } else {
+    s_startLat = g_lat0 + 0.001; s_startLon = g_lon0 + 0.001;
+    s_stopLat  = g_lat1 - 0.001; s_stopLon  = g_lon1 - 0.001;
+    ESP_LOGI(TAG, "selftest: A* corner-to-corner of the %.1fkm x %.1fkm box",
+             (g_lon1 - g_lon0) * 109.3, (g_lat1 - g_lat0) * 111.3);
+  }
   routing_compute();
-}
-
-/* ---------------- SD save ---------------- */
-static void routing_save_to_sd(void)
-{
-  FILE *f = fopen("/sdcard/routing_selection.txt", "w");
-  if (!f) { ESP_LOGE(TAG, "cannot open /sdcard/routing_selection.txt"); return; }
-  ESP_LOGI(TAG, "saving selection to /sdcard/routing_selection.txt");
-  fprintf(f, "start %.6f %.6f\n", s_startLat, s_startLon);
-  fprintf(f, "stop  %.6f %.6f\n", s_stopLat, s_stopLon);
-  fclose(f);
-  ESP_LOGI(TAG, "saved selection to /sdcard/routing_selection.txt");
 }
 
 /* ---------------- touch ---------------- */
@@ -328,26 +360,11 @@ bool routing_handle_tap(int x, int y)
   if (s_mode == ROUTE_PICK_STOP) {
     s_stopX = x; s_stopY = y;
     map_screen_to_latlon(x, y, &s_stopLat, &s_stopLon);
-    s_mode = ROUTE_CONFIRM;
-    ESP_LOGI(TAG, "stop %.6f,%.6f - computing preview", s_stopLat, s_stopLon);
-    routing_compute();   /* run A* now so the confirm dialog shows the real path */
+    ESP_LOGI(TAG, "stop %.6f,%.6f - computing", s_stopLat, s_stopLon);
+    routing_compute();   /* A* now; on success we jump straight to DONE */
+    s_mode = ROUTE_DONE; /* no confirm dialog: show the path + run stats */
     ui_mark_redraw();
     return true;
-  }
-  if (s_mode == ROUTE_CONFIRM) {
-    if (x >= YES_X && x < YES_X + YES_W && y >= YES_Y && y < YES_Y + YES_H) {
-      s_mode = ROUTE_DONE;
-      routing_compute();
-      return true;
-    }
-    if (x >= NO_X && x < NO_X + NO_W && y >= NO_Y && y < NO_Y + NO_H) {
-      routing_save_to_sd();
-      s_mode = ROUTE_IDLE;
-      ui_mark_redraw();
-      return true;
-    }
-    ESP_LOGI(TAG, "confirm tap at (%d,%d) - hit Yes/No", x, y);
-    return true;   /* consumed; must hit Yes/No */
   }
   /* ROUTE_DONE: the path PERSISTS (drawn screen-fixed, follows pan/zoom).
    * Tapping ROUTE again starts a fresh route and clears the old path; every
@@ -431,34 +448,6 @@ void routing_draw_overlay(LGFX_Sprite &spr)
     drawStatus(spr, "PICK STOP");
     if (s_startX >= 0) drawCrosshair(spr, s_startX, s_startY, ROUTE_COL_START);
     return;
-  case ROUTE_CONFIRM: {
-    char conf[48];
-    if (s_pathN >= 2)
-      snprintf(conf, sizeof conf, "CONFIRM - %u pts, %u m", s_pathN, (unsigned)s_lastDistM);
-    else
-      snprintf(conf, sizeof conf, "CONFIRM");
-    drawStatus(spr, conf);
-    drawPathOverlay(spr);   /* preview the route before confirming */
-    if (s_startX >= 0) drawCrosshair(spr, s_startX, s_startY, ROUTE_COL_START);
-    if (s_stopX >= 0)  drawCrosshair(spr, s_stopX,  s_stopY,  ROUTE_COL_STOP);
-    const uint16_t dlg = spr.color565(22, 24, 30);
-    spr.fillRoundRect(PROMPT_X, PROMPT_Y, PROMPT_W, PROMPT_H, 6, dlg);
-    spr.drawRoundRect(PROMPT_X, PROMPT_Y, PROMPT_W, PROMPT_H, 6, TFT_WHITE);
-    spr.setTextColor(TFT_WHITE, dlg);
-    spr.setTextFont(2);
-    spr.setCursor(PROMPT_X + 20, PROMPT_Y + 8);
-    spr.print("Add path?");
-    spr.fillRoundRect(YES_X, YES_Y, YES_W, YES_H, 4, spr.color565(40, 150, 70));
-    spr.setTextColor(TFT_WHITE, spr.color565(40, 150, 70));
-    spr.setCursor(YES_X + 20, YES_Y + 5);
-    spr.print("Yes");
-    spr.fillRoundRect(NO_X, NO_Y, NO_W, NO_H, 4, spr.color565(180, 60, 60));
-    spr.setTextColor(TFT_WHITE, spr.color565(180, 60, 60));
-    spr.setCursor(NO_X + 24, NO_Y + 5);
-    spr.print("No");
-    spr.setTextFont(1);
-    return;
-  }
   case ROUTE_DONE: {
     char tag[48];
     snprintf(tag, sizeof tag, "ROUTED %u pts  %u ms  %u m", s_pathN, (unsigned)s_lastMs, (unsigned)s_lastDistM);

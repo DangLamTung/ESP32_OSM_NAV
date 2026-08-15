@@ -22,6 +22,12 @@ void routing_init(void);
  * Validates the engine on-device without needing the touch UI. */
 void routing_selftest(void);
 
+/* true while the offline-routing UI is active (PICK_START..DONE). The main
+ * loop keeps the map north-up during this window so the screen-fixed path and
+ * crosshairs stay aligned (BLE heading-up would otherwise rotate the map out
+ * from under them). */
+bool routing_active(void);
+
 /* Tap handler for the routing state machine. Returns true if the tap was
  * consumed (button / crosshair pick / confirm dialog). */
 bool routing_handle_tap(int x, int y);

@@ -213,29 +213,32 @@ void map_push(void)
 }
 
 /* Screen tap -> geographic (lat/lon) for the offline-routing crosshair picks.
- * The world sprite is composed with its CENTER at (centerLon,centerLat) and the
+ * The world sprite is composed with its CENTER at (s_refLon,s_refLat) and the
  * view window blitted at -(WORLD-SCREEN)/2 - s_offX/Y, so a screen point maps
  * to a world-LOCAL pixel, then to an ABSOLUTE mercator pixel by offsetting the
- * world centre. Assumes rotation 0 (the routing UI forces north-up).
- * (Fixed: was treating the local pixel as absolute -> taps near the map edge.) */
+ * world centre. Uses the COMPOSE reference, NOT centerLon/centerLat — between
+ * recomposes the view scrolls via s_offX/Y and the two differ by exactly the
+ * scroll offset, so using the view centre double-counted it and the routing
+ * path drifted off the roads when panning. Assumes rotation 0 (north-up). */
 void map_screen_to_latlon(int sx, int sy, double *lat, double *lon)
 {
     double wxLocal = sx + (MAP_WORLD_SIZE - SCREEN_W) / 2.0 + s_offX;
     double wyLocal = sy + (MAP_WORLD_SIZE - SCREEN_H) / 2.0 + s_offY;
-    double absX = (wxLocal - MAP_WORLD_SIZE / 2.0) + lon2wx(centerLon, ZOOM);
-    double absY = (wyLocal - MAP_WORLD_SIZE / 2.0) + lat2wy(centerLat, ZOOM);
+    double absX = (wxLocal - MAP_WORLD_SIZE / 2.0) + lon2wx(s_refLon, ZOOM);
+    double absY = (wyLocal - MAP_WORLD_SIZE / 2.0) + lat2wy(s_refLat, ZOOM);
     *lon = wx2lon(absX, ZOOM);
     *lat = wy2lat(absY, ZOOM);
 }
 
-/* Inverse of map_screen_to_latlon (north-up). Used by the routing overlay to
- * draw the computed path / markers screen-fixed without a world recompose. */
+/* Inverse of map_screen_to_latlon (north-up, world centred on the compose
+ * reference s_refLon/s_refLat). Used by the routing overlay to draw the
+ * computed path / markers screen-fixed. */
 void map_latlon_to_screen(double lat, double lon, int *sx, int *sy)
 {
     double absX = lon2wx(lon, ZOOM);
     double absY = lat2wy(lat, ZOOM);
-    double wxLocal = (absX - lon2wx(centerLon, ZOOM)) + MAP_WORLD_SIZE / 2.0;
-    double wyLocal = (absY - lat2wy(centerLat, ZOOM)) + MAP_WORLD_SIZE / 2.0;
+    double wxLocal = (absX - lon2wx(s_refLon, ZOOM)) + MAP_WORLD_SIZE / 2.0;
+    double wyLocal = (absY - lat2wy(s_refLat, ZOOM)) + MAP_WORLD_SIZE / 2.0;
     *sx = (int)lround(wxLocal - (MAP_WORLD_SIZE - SCREEN_W) / 2.0 - s_offX);
     *sy = (int)lround(wyLocal - (MAP_WORLD_SIZE - SCREEN_H) / 2.0 - s_offY);
 }
