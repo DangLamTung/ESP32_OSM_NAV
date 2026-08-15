@@ -41,8 +41,4 @@ bool routing_handle_tap(int x, int y);
  * drawMap() every frame after the HUD (FULL mode only). */
 void routing_draw_overlay(LGFX_Sprite &spr);
 
-/* Draw the computed path (if any) onto the north-up world sprite, like the
- * nav route — called when the world is recomposed. */
-void routing_draw_world(LGFX_Sprite &world, double refLon, double refLat, int zoom);
-
 #endif // ROUTING_H_

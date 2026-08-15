@@ -1,16 +1,16 @@
 /**
- * routing.cpp — offline-routing prototype (routing.h).
+ * routing.cpp — offline routing over the real OSM road graph (routing.h).
  *
- * A* with a decrease-key binary heap over a synthetic 8-connected grid graph
- * held in PSRAM. The graph spans a lat/lon box around Bến Thành so screen taps
- * (converted via map_screen_to_latlon) land on it. This validates the engine,
- * heap, timing (ms) and memory on the real ESP32 before a real OSM graph is
- * wired in.
+ * The graph is loaded from /sdcard/routing.rng (see route_graph.cpp): either a
+ * small whole-file RNG1 region or a window of the whole-country RNG2 file.
+ * The ROUTE feature is gated on the OFFLINE RTE setting — when off, the button
+ * is disabled and no graph is loaded (fast boot).
  *
  * UI flow (touch):
- *   ROUTE button -> PICK_START -> (tap) -> PICK_STOP -> (tap) -> CONFIRM
- *     Yes -> run A*, draw path (magenta) on the world, log stats
- *     No  -> save start/stop to /sdcard/routing_selection.txt and exit
+ *   ROUTE button -> PICK_START -> (tap) -> PICK_STOP -> (tap) -> compute and
+ *   draw the magenta path on the map + show run stats (pts/ms/m). Picks are
+ *   rejected on control buttons, and the RNG2 window reloads around the current
+ *   view so routing works anywhere in the country.
  */
 #include "routing.h"
 #include "route_graph.h"      /* real OSM road graph (.rng from SD) */
@@ -34,21 +34,15 @@ static const char *TAG = "route";
 #define ROUTE_BTN_W 44
 #define ROUTE_BTN_H 36
 
-/* ---- synthetic test grid (box centred on the CURRENT map centre so taps
- *      always land inside it — start/stop stay distinct) ---- */
-#define GRID_W 240
-#define GRID_H 160
-#define GRID_N (GRID_W * GRID_H)
+/* ---- path / scratch buffers ---- */
 #define MAX_PATH_PTS 4096
-#define INF 0xFFFFFFFFu
-static double g_lat0, g_lat1, g_lon0, g_lon1;   /* grid box (re-centred on the car) */
 
 /* start = cyan, stop = yellow (clearly distinct on the map) */
 #define ROUTE_COL_START 0x07FF
 #define ROUTE_COL_STOP  0xFFE0
 
 static enum { ROUTE_IDLE, ROUTE_PICK_START, ROUTE_PICK_STOP, ROUTE_DONE } s_mode = ROUTE_IDLE;
-static bool s_useReal = false;   /* real OSM graph loaded (else synthetic grid) */
+static bool s_useReal = false;   /* real OSM graph loaded (gated on OFFLINE RTE) */
 static uint32_t s_announceMS = 0;   /* show the ±range announcement briefly */
 
 bool routing_active(void) { return s_mode != ROUTE_IDLE; }
@@ -60,51 +54,6 @@ static struct { double lat, lon; } s_path[MAX_PATH_PTS];
 static int s_pathN = 0;
 static uint32_t s_lastVisited = 0, s_lastMs = 0, s_lastDistM = 0;
 static double *s_rlat = NULL, *s_rlon = NULL;   /* real-graph path scratch (PSRAM) */
-
-/* ---- A* arrays (PSRAM) ---- */
-static uint32_t *g_dist;      /* g score (cost units) */
-static uint32_t *g_f;         /* f = g + h */
-static int32_t  *g_prev;      /* reconstruction */
-static uint8_t  *g_closed;
-static int32_t  *g_heap;      /* binary heap of node ids */
-static int32_t  *g_heapPos;   /* node -> heap index (-1 = not in heap) */
-static int       g_heapN = 0;
-
-static inline int idx(int col, int row) { return row * GRID_W + col; }
-
-/* node -> lat/lon (grid cell centers) */
-static inline double nodeLat(int row) { return g_lat0 + (g_lat1 - g_lat0) * row / (GRID_H - 1); }
-static inline double nodeLon(int col) { return g_lon0 + (g_lon1 - g_lon0) * col / (GRID_W - 1); }
-
-static inline int colOf(double lon) {
-  double c = (lon - g_lon0) / (g_lon1 - g_lon0) * (GRID_W - 1);
-  if (c < 0) { c = 0; }
-  if (c > GRID_W - 1) { c = GRID_W - 1; }
-  return (int)lround(c);
-}
-static inline int rowOf(double lat) {
-  double r = (lat - g_lat0) / (g_lat1 - g_lat0) * (GRID_H - 1);
-  if (r < 0) { r = 0; }
-  if (r > GRID_H - 1) { r = GRID_H - 1; }
-  return (int)lround(r);
-}
-
-/* re-centre the ~5.5km box on the current map centre so taps near the car map
- * to distinct grid nodes (fixes start==stop -> no path). */
-static void grid_recenter(void) {
-  const double spanLat = 0.05, spanLon = 0.05;   /* ~5.5km x ~5.5km */
-  g_lat0 = centerLat - spanLat / 2.0;
-  g_lat1 = centerLat + spanLat / 2.0;
-  g_lon0 = centerLon - spanLon / 2.0;
-  g_lon1 = centerLon + spanLon / 2.0;
-}
-
-/* exact 8-neighbour admissible heuristic: 10 per straight + 14 per diagonal */
-static uint32_t heuristic(int col, int row, int tCol, int tRow) {
-  int dc = abs(col - tCol), dr = abs(row - tRow);
-  int mn = (dr < dc) ? dr : dc;
-  return (uint32_t)(10 * (dr + dc - 2 * mn) + 14 * mn);
-}
 
 void routing_init(void)
 {
@@ -145,47 +94,6 @@ void routing_set_offline(bool on)
   ui_mark_redraw();
 }
 
-/* ---------------- binary heap (min by g_f, decrease-key) ---------------- */
-static void heapPush(int32_t node) {
-  g_heapPos[node] = g_heapN;
-  int i = g_heapN++;
-  while (i > 0) {
-    int p = (i - 1) / 2;
-    if (g_f[g_heap[p]] <= g_f[node]) break;
-    g_heap[i] = g_heap[p]; g_heapPos[g_heap[p]] = i;
-    i = p;
-  }
-  g_heap[i] = node; g_heapPos[node] = i;
-}
-static int32_t heapPop(void) {
-  int32_t top = g_heap[0];
-  int32_t last = g_heap[--g_heapN];
-  if (g_heapN > 0) {
-    int i = 0;
-    for (;;) {
-      int l = 2 * i + 1, r = l + 1, m = i;
-      if (l < g_heapN && g_f[g_heap[l]] < g_f[g_heap[m]]) m = l;
-      if (r < g_heapN && g_f[g_heap[r]] < g_f[g_heap[m]]) m = r;
-      if (m == i) break;
-      g_heap[i] = g_heap[m]; g_heapPos[g_heap[m]] = i;
-      i = m;
-    }
-    g_heap[i] = last; g_heapPos[last] = i;
-  }
-  g_heapPos[top] = -1;
-  return top;
-}
-static void heapDecreaseKey(int32_t node) {
-  int i = g_heapPos[node];
-  while (i > 0) {
-    int p = (i - 1) / 2;
-    if (g_f[g_heap[p]] <= g_f[node]) break;
-    g_heap[i] = g_heap[p]; g_heapPos[g_heap[p]] = i;
-    i = p;
-  }
-  g_heap[i] = node; g_heapPos[node] = i;
-}
-
 /* ---------------- A* ---------------- */
 static bool routing_compute(void)
 {
@@ -214,102 +122,6 @@ static bool routing_compute(void)
     }
     return false;
   }
-
-  /* ---- synthetic test grid (kept as unreachable fallback code so the A*
-   * helpers stay referenced; the guard above returns before this when the
-   * real graph is inactive) ---- */
-  int sCol = colOf(s_startLon), sRow = rowOf(s_startLat);
-  int tCol = colOf(s_stopLon),  tRow = rowOf(s_stopLat);
-  int start = idx(sCol, sRow), stop = idx(tCol, tRow);
-
-  s_pathN = 0;
-  if (start == stop) {
-    s_path[0].lat = s_startLat; s_path[0].lon = s_startLon;
-    s_pathN = 1;
-    ESP_LOGI(TAG, "start==stop, trivial");
-    return true;
-  }
-
-  g_heapN = 0;
-  for (int i = 0; i < GRID_N; i++) {
-    g_dist[i] = INF; g_f[i] = INF; g_prev[i] = -1; g_closed[i] = 0; g_heapPos[i] = -1;
-  }
-  g_dist[start] = 0;
-  g_f[start] = heuristic(sCol, sRow, tCol, tRow);
-  heapPush(start);
-
-  const int dc[8] = {1, 0, -1, 0, 1, 1, -1, -1};
-  const int dr[8] = {0, 1, 0, -1, 1, -1, 1, -1};
-  const uint32_t cc[8] = {10, 10, 10, 10, 14, 14, 14, 14};
-
-  uint32_t visited = 0;
-  uint32_t t0 = esp_timer_get_time();
-  bool found = false;
-
-  while (g_heapN > 0) {
-    int32_t u = heapPop();
-    if (g_closed[u]) continue;
-    g_closed[u] = 1;
-    visited++;
-    if (u == stop) { found = true; break; }
-
-    int ur = u / GRID_W, uc = u % GRID_W;
-    for (int k = 0; k < 8; k++) {
-      int nc = uc + dc[k], nr = ur + dr[k];
-      if (nc < 0 || nc >= GRID_W || nr < 0 || nr >= GRID_H) continue;
-      int v = idx(nc, nr);
-      if (g_closed[v]) continue;
-      uint32_t nd = g_dist[u] + cc[k];
-      if (nd < g_dist[v]) {
-        g_dist[v] = nd;
-        g_prev[v] = u;
-        g_f[v] = nd + heuristic(nc, nr, tCol, tRow);
-        if (g_heapPos[v] < 0) heapPush(v); else heapDecreaseKey(v);
-      }
-    }
-  }
-  uint32_t ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
-
-  if (!found) {
-    ESP_LOGW(TAG, "A* no path found (visited %u in %ums)", (unsigned)visited, (unsigned)ms);
-    s_lastVisited = visited; s_lastMs = ms; s_lastDistM = 0;
-    return false;
-  }
-
-  /* reconstruct: stop -> start via prev */
-  static int rev[MAX_PATH_PTS];
-  int revN = 0;
-  int32_t cur = stop;
-  while (cur >= 0 && revN < MAX_PATH_PTS) {
-    rev[revN++] = (int)cur;
-    if (cur == start) break;
-    cur = g_prev[cur];
-  }
-  /* reverse into s_path[] with real lat/lon */
-  s_pathN = 0;
-  for (int i = revN - 1; i >= 0 && s_pathN < MAX_PATH_PTS; i--) {
-    int n = rev[i];
-    s_path[s_pathN].lat = nodeLat(n / GRID_W);
-    s_path[s_pathN].lon = nodeLon(n % GRID_W);
-    s_pathN++;
-  }
-
-  /* meters: sum cell sizes along the path */
-  double mppLat = (g_lat1 - g_lat0) / (GRID_H - 1) * 111320.0;
-  double mppLon = (g_lon1 - g_lon0) / (GRID_W - 1) * 111320.0 * cos(s_startLat * M_PI / 180.0);
-  uint32_t meters = 0;
-  for (int i = 1; i < s_pathN; i++) {
-    double dLat = (s_path[i].lat - s_path[i - 1].lat) / ((g_lat1 - g_lat0) / (GRID_H - 1)) * mppLat;
-    double dLon = (s_path[i].lon - s_path[i - 1].lon) / ((g_lon1 - g_lon0) / (GRID_W - 1)) * mppLon;
-    meters += (uint32_t)lround(sqrt(dLat * dLat + dLon * dLon));
-  }
-
-  s_lastVisited = visited; s_lastMs = ms; s_lastDistM = meters;
-  ESP_LOGI(TAG, "A* done: visited=%u time=%ums path=%dpts dist=%um sram=%u",
-           (unsigned)visited, (unsigned)ms, s_pathN, (unsigned)meters,
-           (unsigned)esp_get_free_heap_size());
-  ui_mark_redraw();   /* path is drawn screen-fixed in the overlay -> no recompose */
-  return true;
 }
 
 /* Boot self-test: route across the loaded graph window and log the real
@@ -390,7 +202,6 @@ bool routing_handle_tap(int x, int y)
       routing_reload_window();   /* pan-to-anywhere support */
       s_mode = ROUTE_PICK_START;
       s_pathN = 0;
-      grid_recenter();   /* box follows the car so taps land on distinct nodes */
       /* routing needs the map: if we are in the text-only SIMPLE screen,
        * switch to FULL so the crosshairs + path are visible */
       if (ui_nav_mode() == UI_MODE_SIMPLE) ui_cycle_nav_mode();
@@ -433,7 +244,6 @@ bool routing_handle_tap(int x, int y)
     routing_reload_window();   /* pan-to-anywhere support */
     s_mode = ROUTE_PICK_START;
     s_pathN = 0;
-    grid_recenter();
     if (ui_nav_mode() == UI_MODE_SIMPLE) ui_cycle_nav_mode();
     map_set_heading_up(false);
     map_set_rotation(0);
@@ -535,24 +345,5 @@ void routing_draw_overlay(LGFX_Sprite &spr)
   }
   default:
     return;
-  }
-}
-
-/* Draw the computed path as a magenta polyline on the north-up world sprite
- * (rotates/scrolls with the map, same as the nav route). */
-void routing_draw_world(LGFX_Sprite &world, double refLon, double refLat, int zoom)
-{
-  if (s_pathN < 2) return;
-  double tlX = lon2wx(refLon, zoom) - world.width() / 2.0;
-  double tlY = lat2wy(refLat, zoom) - world.height() / 2.0;
-  int px = 0, py = 0;
-  for (int i = 0; i < s_pathN; i++) {
-    int sx = (int)lround(lon2wx(s_path[i].lon, zoom) - tlX);
-    int sy = (int)lround(lat2wy(s_path[i].lat, zoom) - tlY);
-    if (i > 0) {
-      world.drawWideLine(px, py, sx, sy, 3.0f, TFT_NAVY);
-      world.drawWideLine(px, py, sx, sy, 1.5f, 0xF81F);   /* magenta */
-    }
-    px = sx; py = sy;
   }
 }

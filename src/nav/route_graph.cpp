@@ -38,14 +38,6 @@ static double    g_winCenLat = 0, g_winCenLon = 0, g_winRad = 0;
 
 bool rg_is_windowed(void) { return g_windowed; }
 
-bool rg_window_covers(double lat, double lon, double marginDeg)
-{
-    if (!g_windowed)
-        return true;   /* whole-file graph covers everywhere */
-    double r = g_winRad + marginDeg;
-    return fabs(lat - g_winCenLat) <= r && fabs(lon - g_winCenLon) <= r;
-}
-
 /* ---- tap-snap cell index (PSRAM) ---- */
 #define CELL_DEG 0.0040            /* ~440 m cells */
 static uint16_t g_cellW = 0, g_cellH = 0;
@@ -289,7 +281,7 @@ static bool rg_load_rng2(FILE *fp, const char *path)
     RngRange *ranges = (RngRange *)heap_caps_malloc((uint32_t)nCovered * sizeof(RngRange),
             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!ranges) { free(cnf); fclose(fp); ESP_LOGE(TAG, "RNG2 ranges alloc failed"); return false; }
-    uint32_t M = 0, keptEdges = 0;
+    uint32_t M = 0;
     for (int r = 0; r < ncy; r++) {
         for (int c = 0; c < ncx; c++) {
             uint32_t s = cnf[r * (ncx + 1) + c];
