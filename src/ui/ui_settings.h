@@ -20,4 +20,10 @@ bool ui_settings_drag_started(int downX, int downY); /* drag on brightness slide
 void ui_settings_slider_drag(int x);                 /* live brightness from drag */
 int  ui_brightness(void);          /* current brightness (settings panel thumb) */
 
+/* offline (real-road) routing toggle, persisted to /sdcard/config.txt. When
+ * OFF the big graph is not loaded at boot (faster boot, less PSRAM). */
+void ui_settings_init(void);       /* read /sdcard/config.txt once at boot */
+bool ui_offline_route_enabled(void);
+void ui_toggle_offline_route(void);/* flip + persist + load/unload the graph */
+
 #endif // UI_SETTINGS_H_

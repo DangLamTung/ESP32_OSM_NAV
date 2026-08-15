@@ -124,6 +124,11 @@
 #define AA_BTN_Y   (SETTINGS_PANEL_Y + 40)     /* 184 */
 #define AA_BTN_W   150
 #define AA_BTN_H   22
+/* offline-routing toggle (settings panel, row 2 right of ROT) */
+#define OR_BTN_X  (AA_BTN_X + AA_BTN_W + 8)    /* 168 */
+#define OR_BTN_Y  (SETTINGS_PANEL_Y + 40)      /* 184 */
+#define OR_BTN_W  (SCREEN_W - OR_BTN_X - 10)   /* 142 */
+#define OR_BTN_H  22
 #define SLIDER_X   10
 #define SLIDER_Y   (SETTINGS_PANEL_Y + 72)     /* 216 */
 #define SLIDER_W   (SCREEN_W - 20)

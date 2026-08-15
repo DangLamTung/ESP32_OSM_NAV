@@ -199,6 +199,7 @@ void setup()
     }
     else
         Serial.println("SD card not detected (no card? wrong FS?)");
+    ui_settings_init();   /* read /sdcard/config.txt (offline_route etc.) */
     ui_show_splash();
 
     /* NVS: wipe + re-init at boot. Bluedroid SMP was crashing on corrupt bond
@@ -219,7 +220,10 @@ void setup()
     navSetGpsBroadcast(GPS_BROADCAST_DEFAULT);
 
     map_init();
-    routing_init();      /* offline-routing prototype: build the test grid graph */
+    routing_init();   /* fallback test grid */
+    /* load the real SD road graph only if the settings toggle is ON (faster
+     * boot when offline routing isn't needed) */
+    routing_set_offline(ui_offline_route_enabled());
     routing_selftest();  /* log real on-device A* timing (corner-to-corner) */
 
     /* arm wake-on-touch (FT6336 INT) regardless of WiFi outcome */

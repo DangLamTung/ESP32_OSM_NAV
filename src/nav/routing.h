@@ -28,6 +28,11 @@ void routing_selftest(void);
  * from under them). */
 bool routing_active(void);
 
+/* Enable/disable offline (real-road) routing at runtime. ON loads the graph
+ * from SD and frees the synthetic grid; OFF unloads it to free PSRAM (faster
+ * boot when offline routing isn't needed). Set from the settings panel. */
+void routing_set_offline(bool on);
+
 /* Tap handler for the routing state machine. Returns true if the tap was
  * consumed (button / crosshair pick / confirm dialog). */
 bool routing_handle_tap(int x, int y);

@@ -15,6 +15,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* RNG2 windowed-loading radius (~0.06 deg) in km, announced in the routing UI. */
+#define ROUTE_WINDOW_RADIUS_KM 7
+
 /* Load /sdcard/<path> routing graph into PSRAM (coords + CSR + snap cell
  * index). Call rg_astar_init() afterwards to allocate the A* working arrays
  * (do that AFTER freeing the synthetic grid so they fit together). */

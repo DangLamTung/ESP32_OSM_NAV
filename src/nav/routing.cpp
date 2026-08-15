@@ -49,6 +49,7 @@ static double g_lat0, g_lat1, g_lon0, g_lon1;   /* grid box (re-centred on the c
 
 static enum { ROUTE_IDLE, ROUTE_PICK_START, ROUTE_PICK_STOP, ROUTE_DONE } s_mode = ROUTE_IDLE;
 static bool s_useReal = false;   /* real OSM graph loaded (else synthetic grid) */
+static uint32_t s_announceMS = 0;   /* show the ±range announcement briefly */
 
 bool routing_active(void) { return s_mode != ROUTE_IDLE; }
 
@@ -105,7 +106,9 @@ static uint32_t heuristic(int col, int row, int tCol, int tRow) {
   return (uint32_t)(10 * (dr + dc - 2 * mn) + 14 * mn);
 }
 
-void routing_init(void)
+/* (re)build the synthetic test grid — the fallback used when the real graph
+ * is not loaded (offline routing OFF). Returns false on OOM. */
+static bool synthetic_alloc(void)
 {
   g_dist    = (uint32_t *)heap_caps_malloc(GRID_N * sizeof(uint32_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   g_f       = (uint32_t *)heap_caps_malloc(GRID_N * sizeof(uint32_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -115,33 +118,58 @@ void routing_init(void)
   g_heapPos = (int32_t  *)heap_caps_malloc(GRID_N * sizeof(int32_t),  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!g_dist || !g_f || !g_prev || !g_closed || !g_heap || !g_heapPos) {
     ESP_LOGE(TAG, "failed to allocate A* arrays (%u nodes)", (unsigned)GRID_N);
-    return;
+    return false;
   }
   grid_recenter();
   ESP_LOGI(TAG, "test grid %dx%d = %u nodes, arrays %.1f KB PSRAM, box %.1fx%.1f km",
            GRID_W, GRID_H, (unsigned)GRID_N,
            (double)(GRID_N * (4 + 4 + 4 + 1 + 4 + 4)) / 1024.0,
            (g_lon1 - g_lon0) * 109.3, (g_lat1 - g_lat0) * 111.3);
+  return true;
+}
 
-  /* try the REAL OSM road graph from SD; on success free the synthetic grid
-   * (it was only for validating the engine) to make room for the real one. */
+static void synthetic_free(void)
+{
+  free(g_dist); free(g_f); free(g_prev); free(g_closed); free(g_heap); free(g_heapPos);
+  g_dist = NULL; g_f = NULL; g_prev = NULL; g_heap = NULL; g_heapPos = NULL; g_closed = NULL;
+}
+
+void routing_init(void)
+{
   s_rlat = (double *)heap_caps_malloc(MAX_PATH_PTS * sizeof(double), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   s_rlon = (double *)heap_caps_malloc(MAX_PATH_PTS * sizeof(double), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!s_rlat) s_rlat = (double *)malloc(MAX_PATH_PTS * sizeof(double));
   if (!s_rlon) s_rlon = (double *)malloc(MAX_PATH_PTS * sizeof(double));
-  if (rg_load("/sdcard/routing.rng")) {
-    /* free the synthetic grid FIRST so the real A* arrays fit in PSRAM */
-    free(g_dist); free(g_f); free(g_prev); free(g_closed); free(g_heap); free(g_heapPos);
-    g_dist = NULL; g_f = NULL; g_prev = NULL; g_heap = NULL; g_heapPos = NULL; g_closed = NULL;
-    if (rg_astar_init()) {
+  synthetic_alloc();   /* fallback grid; the real graph loads via routing_set_offline */
+}
+
+/* Enable/disable offline (real-road) routing at runtime. ON loads the graph
+ * from SD and frees the synthetic grid; OFF unloads it (faster boot, less
+ * PSRAM when offline routing isn't needed). Called from the settings panel
+ * and from setup() with the persisted setting. */
+void routing_set_offline(bool on)
+{
+  if (on == s_useReal)
+    return;
+  if (on) {
+    synthetic_free();   /* make room FIRST so the real A* arrays fit */
+    if (rg_load("/sdcard/routing.rng") && rg_astar_init()) {
       s_useReal = true;
-      ESP_LOGI(TAG, "real graph active (%u nodes)", (unsigned)rg_node_count());
+      ESP_LOGI(TAG, "offline routing ON: real graph active (%u nodes)",
+               (unsigned)rg_node_count());
     } else {
-      /* not enough PSRAM for A*: give the graph back, keep the synthetic grid */
       rg_unload();
-      ESP_LOGE(TAG, "not enough PSRAM for real A* - keeping synthetic grid");
+      synthetic_alloc();   /* keep the fallback grid working */
+      ESP_LOGE(TAG, "offline routing ON but graph load failed - synthetic grid");
     }
+  } else {
+    rg_unload();
+    s_useReal = false;
+    s_pathN = 0;
+    synthetic_alloc();
+    ESP_LOGI(TAG, "offline routing OFF - synthetic grid");
   }
+  ui_mark_redraw();
 }
 
 /* ---------------- binary heap (min by g_f, decrease-key) ---------------- */
@@ -342,6 +370,7 @@ bool routing_handle_tap(int x, int y)
       if (ui_nav_mode() == UI_MODE_SIMPLE) ui_cycle_nav_mode();
       map_set_heading_up(false);   /* crosshair mapping assumes north-up */
       map_set_rotation(0);
+      s_announceMS = millis();
       ESP_LOGI(TAG, "pick start (tap the map)");
       ui_mark_redraw();
       return true;
@@ -378,6 +407,7 @@ bool routing_handle_tap(int x, int y)
     if (ui_nav_mode() == UI_MODE_SIMPLE) ui_cycle_nav_mode();
     map_set_heading_up(false);
     map_set_rotation(0);
+    s_announceMS = millis();
     ESP_LOGI(TAG, "pick start (tap the map)");
     ui_mark_redraw();
     return true;
@@ -395,14 +425,18 @@ static void drawCrosshair(LGFX_Sprite &spr, int x, int y, uint16_t col) {
   spr.fillRect(x - 2, y - 2, 5, 5, TFT_WHITE);       /* centre */
 }
 
-static void drawStatus(LGFX_Sprite &spr, const char *txt) {
+static void drawStatusAt(LGFX_Sprite &spr, const char *txt, int y) {
   spr.setTextFont(1);
   spr.setTextColor(TFT_WHITE, 0x2104);
   int w = spr.textWidth(txt);
-  spr.fillRect(SCREEN_W / 2 - w / 2 - 8, 2, w + 16, 15, 0x2104);
-  spr.drawRect(SCREEN_W / 2 - w / 2 - 8, 2, w + 16, 15, 0x39E7);
-  spr.setCursor(SCREEN_W / 2 - w / 2, 5);
+  spr.fillRect(SCREEN_W / 2 - w / 2 - 8, y, w + 16, 15, 0x2104);
+  spr.drawRect(SCREEN_W / 2 - w / 2 - 8, y, w + 16, 15, 0x39E7);
+  spr.setCursor(SCREEN_W / 2 - w / 2, y + 3);
   spr.print(txt);
+}
+
+static void drawStatus(LGFX_Sprite &spr, const char *txt) {
+  drawStatusAt(spr, txt, 2);
 }
 
 /* draw the computed path + start/stop markers screen-fixed (always visible) */
@@ -441,9 +475,18 @@ void routing_draw_overlay(LGFX_Sprite &spr)
   spr.setTextFont(1);
 
   switch (s_mode) {
-  case ROUTE_PICK_START:
-    drawStatus(spr, "PICK START");
+  case ROUTE_PICK_START: {
+    /* announce the offline window range for a few seconds on entry */
+    if (s_announceMS && (millis() - s_announceMS) < 3500) {
+      char ann[40];
+      snprintf(ann, sizeof ann, "OFFLINE ROUTE MAX ~%d KM", ROUTE_WINDOW_RADIUS_KM);
+      drawStatusAt(spr, ann, 2);
+      drawStatusAt(spr, "TAP START POINT", 19);
+    } else {
+      drawStatus(spr, "PICK START");
+    }
     return;
+  }
   case ROUTE_PICK_STOP:
     drawStatus(spr, "PICK STOP");
     if (s_startX >= 0) drawCrosshair(spr, s_startX, s_startY, ROUTE_COL_START);

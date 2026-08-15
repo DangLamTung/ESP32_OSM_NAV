@@ -139,6 +139,16 @@ static void ui_draw_settings_panel(LovyanGFX *dst)
     dst->setCursor(AA_BTN_X + 6, AA_BTN_Y + 6);
     dst->print(aa ? "ROT: CRISP" : "ROT: FAST");
 
+    /* offline-routing toggle (green = loads the real road graph from SD) */
+    bool orOn = ui_offline_route_enabled();
+    uint16_t obg = orOn ? dst->color565(40, 150, 70) : dst->color565(70, 74, 82);
+    dst->fillRect(OR_BTN_X, OR_BTN_Y, OR_BTN_W, OR_BTN_H, obg);
+    dst->drawRect(OR_BTN_X, OR_BTN_Y, OR_BTN_W - 1, OR_BTN_H - 1, TFT_BLACK);
+    dst->setTextColor(TFT_WHITE, obg);
+    dst->setTextFont(1);
+    dst->setCursor(OR_BTN_X + 6, OR_BTN_Y + 6);
+    dst->print(orOn ? "OFFLINE RTE: ON" : "OFFLINE RTE: OFF");
+
     /* brightness slider */
     dst->setTextColor(TFT_WHITE, panelBG);
     dst->setCursor(SLIDER_X, SLIDER_Y - 12);

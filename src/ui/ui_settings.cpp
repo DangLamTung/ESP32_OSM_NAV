@@ -9,11 +9,14 @@
 #include "wifi_net.h"        /* wifi_net_connect() */
 #include "ble_nav.h"         /* navSetGpsBroadcast() */
 #include "map_view.h"        /* map_set_aa() */
+#include "routing.h"         /* routing_set_offline() */
 #include <Arduino.h>
+#include <stdio.h>
 
 /* ---- settings (gear) panel: WiFi connect + brightness slider ---- */
 static bool s_settingsOpen = false;
 static int  s_brightness   = BRIGHTNESS_DEFAULT;
+static bool s_offlineRoute = false;   /* load the real SD graph at boot? */
 
 /* Bottom-bar style, toggled from the settings panel. The next + next-next
  * guidance is ALWAYS drawn over the full map (no separate 2-step mode). */
@@ -34,6 +37,45 @@ void ui_toggle_settings(void)
 {
     s_settingsOpen = !s_settingsOpen;
     Serial.printf("[ui] settings %s\n", s_settingsOpen ? "open" : "closed");
+    ui_mark_redraw();
+}
+
+/* ---- offline-routing toggle (persisted on the SD card) ---- */
+void ui_settings_init(void)
+{
+    s_offlineRoute = false;
+    FILE *f = fopen("/sdcard/config.txt", "r");
+    if (f) {
+        char line[64];
+        while (fgets(line, sizeof line, f)) {
+            if (strncmp(line, "offline_route=", 14) == 0)
+                s_offlineRoute = (atoi(line + 14) != 0);
+        }
+        fclose(f);
+    }
+    Serial.printf("[ui] offline_route=%d (from /sdcard/config.txt)\n", s_offlineRoute);
+}
+
+bool ui_offline_route_enabled(void) { return s_offlineRoute; }
+
+static void ui_persist_config(void)
+{
+    FILE *f = fopen("/sdcard/config.txt", "w");
+    if (!f) {
+        Serial.println("[ui] cannot write /sdcard/config.txt");
+        return;
+    }
+    fprintf(f, "offline_route=%d\n", s_offlineRoute ? 1 : 0);
+    fclose(f);
+    Serial.printf("[ui] saved /sdcard/config.txt offline_route=%d\n", s_offlineRoute);
+}
+
+void ui_toggle_offline_route(void)
+{
+    s_offlineRoute = !s_offlineRoute;
+    routing_set_offline(s_offlineRoute);   /* load/unload the real graph now */
+    ui_persist_config();
+    Serial.printf("[ui] offline_route=%d\n", s_offlineRoute);
     ui_mark_redraw();
 }
 
@@ -87,6 +129,13 @@ bool ui_settings_tap(int x, int y)
     {
         map_set_aa(!map_aa_enabled());
         ui_mark_redraw();
+        return true;
+    }
+    /* offline-routing toggle: loads the real SD graph when ON */
+    if (x >= OR_BTN_X && x < OR_BTN_X + OR_BTN_W &&
+        y >= OR_BTN_Y && y < OR_BTN_Y + OR_BTN_H)
+    {
+        ui_toggle_offline_route();
         return true;
     }
     if (y >= SLIDER_Y && y < SLIDER_Y + SLIDER_H)
