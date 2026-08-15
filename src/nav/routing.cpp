@@ -333,15 +333,14 @@ void routing_selftest(void)
 }
 
 /* ---------------- touch ---------------- */
-/* Reload the whole-country window around the current map centre so offline
- * routing works wherever the user has panned to (the RNG2 window is only
- * centred on the load-time map centre). No-op if it still covers us. */
+/* Reload the whole-country window centred on the CURRENT map centre so offline
+ * routing is correct wherever the user is. Always reloads: the old covers-check
+ * used a 0.07deg margin vs a 0.06deg loaded box, so a moderate pan left the
+ * view outside the loaded cells -> start snap failed -> no route. */
 static void routing_reload_window(void)
 {
   if (!s_useReal || !rg_is_windowed())
     return;
-  if (rg_window_covers(centerLat, centerLon, 0.01))
-    return;   /* still inside the loaded window */
   rg_unload();
   if (rg_load("/sdcard/routing.rng") && rg_astar_init()) {
     s_pathN = 0;
