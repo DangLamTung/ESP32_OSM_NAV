@@ -29,9 +29,9 @@ static const char *TAG = "route";
 
 /* ---- ROUTE button (bottom-left, clear of the bottom-bar pill & zoom col) ---- */
 #define ROUTE_BTN_X 6
-#define ROUTE_BTN_Y (SCREEN_H - 30)
+#define ROUTE_BTN_Y (SCREEN_H - 42)   /* 198 — tall enough to be easy to tap */
 #define ROUTE_BTN_W 44
-#define ROUTE_BTN_H 24
+#define ROUTE_BTN_H 36
 
 /* ---- confirm dialog ---- */
 #define PROMPT_X 60
@@ -297,6 +297,7 @@ static void routing_save_to_sd(void)
 /* ---------------- touch ---------------- */
 bool routing_handle_tap(int x, int y)
 {
+  ESP_LOGI(TAG, "tap(%d,%d) mode=%d", x, y, (int)s_mode);   /* DEBUG: watch taps */
   if (s_mode == ROUTE_IDLE) {
     /* only the ROUTE button is consumed while idle */
     if (x >= ROUTE_BTN_X && x < ROUTE_BTN_X + ROUTE_BTN_W &&
@@ -348,11 +349,23 @@ bool routing_handle_tap(int x, int y)
     ESP_LOGI(TAG, "confirm tap at (%d,%d) - hit Yes/No", x, y);
     return true;   /* consumed; must hit Yes/No */
   }
-  /* ROUTE_DONE: any tap dismisses the path */
-  s_mode = ROUTE_IDLE;
-  s_pathN = 0;
-  ui_mark_redraw();
-  return true;
+  /* ROUTE_DONE: the path PERSISTS (drawn screen-fixed, follows pan/zoom).
+   * Tapping ROUTE again starts a fresh route and clears the old path; every
+   * other tap falls through so zoom/pan/settings still work — previously ANY
+   * tap cleared the path, so zooming in deleted the route. */
+  if (x >= ROUTE_BTN_X && x < ROUTE_BTN_X + ROUTE_BTN_W &&
+      y >= ROUTE_BTN_Y && y < ROUTE_BTN_Y + ROUTE_BTN_H) {
+    s_mode = ROUTE_PICK_START;
+    s_pathN = 0;
+    grid_recenter();
+    if (ui_nav_mode() == UI_MODE_SIMPLE) ui_cycle_nav_mode();
+    map_set_heading_up(false);
+    map_set_rotation(0);
+    ESP_LOGI(TAG, "pick start (tap the map)");
+    ui_mark_redraw();
+    return true;
+  }
+  return false;
 }
 
 /* ---------------- drawing ---------------- */
