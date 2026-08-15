@@ -47,16 +47,18 @@ static const char *TAG = "route";
 #define NO_W  72
 #define NO_H  22
 
-/* ---- synthetic test grid (Bến Thành box) ---- */
+/* ---- synthetic test grid (box centred on the CURRENT map centre so taps
+ *      always land inside it — start/stop stay distinct) ---- */
 #define GRID_W 240
 #define GRID_H 160
 #define GRID_N (GRID_W * GRID_H)
-#define GRID_LAT0 10.752
-#define GRID_LAT1 10.788
-#define GRID_LON0 106.684
-#define GRID_LON1 106.716
 #define MAX_PATH_PTS 4096
 #define INF 0xFFFFFFFFu
+static double g_lat0, g_lat1, g_lon0, g_lon1;   /* grid box (re-centred on the car) */
+
+/* start = cyan, stop = yellow (clearly distinct on the map) */
+#define ROUTE_COL_START 0x07FF
+#define ROUTE_COL_STOP  0xFFE0
 
 static enum { ROUTE_IDLE, ROUTE_PICK_START, ROUTE_PICK_STOP, ROUTE_CONFIRM, ROUTE_DONE } s_mode = ROUTE_IDLE;
 
@@ -79,20 +81,30 @@ static int       g_heapN = 0;
 static inline int idx(int col, int row) { return row * GRID_W + col; }
 
 /* node -> lat/lon (grid cell centers) */
-static inline double nodeLat(int row) { return GRID_LAT0 + (GRID_LAT1 - GRID_LAT0) * row / (GRID_H - 1); }
-static inline double nodeLon(int col) { return GRID_LON0 + (GRID_LON1 - GRID_LON0) * col / (GRID_W - 1); }
+static inline double nodeLat(int row) { return g_lat0 + (g_lat1 - g_lat0) * row / (GRID_H - 1); }
+static inline double nodeLon(int col) { return g_lon0 + (g_lon1 - g_lon0) * col / (GRID_W - 1); }
 
 static inline int colOf(double lon) {
-  double c = (lon - GRID_LON0) / (GRID_LON1 - GRID_LON0) * (GRID_W - 1);
+  double c = (lon - g_lon0) / (g_lon1 - g_lon0) * (GRID_W - 1);
   if (c < 0) { c = 0; }
   if (c > GRID_W - 1) { c = GRID_W - 1; }
   return (int)lround(c);
 }
 static inline int rowOf(double lat) {
-  double r = (lat - GRID_LAT0) / (GRID_LAT1 - GRID_LAT0) * (GRID_H - 1);
+  double r = (lat - g_lat0) / (g_lat1 - g_lat0) * (GRID_H - 1);
   if (r < 0) { r = 0; }
   if (r > GRID_H - 1) { r = GRID_H - 1; }
   return (int)lround(r);
+}
+
+/* re-centre the ~5.5km box on the current map centre so taps near the car map
+ * to distinct grid nodes (fixes start==stop -> no path). */
+static void grid_recenter(void) {
+  const double spanLat = 0.05, spanLon = 0.05;   /* ~5.5km x ~5.5km */
+  g_lat0 = centerLat - spanLat / 2.0;
+  g_lat1 = centerLat + spanLat / 2.0;
+  g_lon0 = centerLon - spanLon / 2.0;
+  g_lon1 = centerLon + spanLon / 2.0;
 }
 
 /* exact 8-neighbour admissible heuristic: 10 per straight + 14 per diagonal */
@@ -114,9 +126,11 @@ void routing_init(void)
     ESP_LOGE(TAG, "failed to allocate A* arrays (%u nodes)", (unsigned)GRID_N);
     return;
   }
-  ESP_LOGI(TAG, "test grid %dx%d = %u nodes, arrays %.1f KB PSRAM",
+  grid_recenter();
+  ESP_LOGI(TAG, "test grid %dx%d = %u nodes, arrays %.1f KB PSRAM, box %.1fx%.1f km",
            GRID_W, GRID_H, (unsigned)GRID_N,
-           (double)(GRID_N * (4 + 4 + 4 + 1 + 4 + 4)) / 1024.0);
+           (double)(GRID_N * (4 + 4 + 4 + 1 + 4 + 4)) / 1024.0,
+           (g_lon1 - g_lon0) * 109.3, (g_lat1 - g_lat0) * 111.3);
 }
 
 /* ---------------- binary heap (min by g_f, decrease-key) ---------------- */
@@ -240,12 +254,12 @@ static bool routing_compute(void)
   }
 
   /* meters: sum cell sizes along the path */
-  double mppLat = (GRID_LAT1 - GRID_LAT0) / (GRID_H - 1) * 111320.0;
-  double mppLon = (GRID_LON1 - GRID_LON0) / (GRID_W - 1) * 111320.0 * cos(s_startLat * M_PI / 180.0);
+  double mppLat = (g_lat1 - g_lat0) / (GRID_H - 1) * 111320.0;
+  double mppLon = (g_lon1 - g_lon0) / (GRID_W - 1) * 111320.0 * cos(s_startLat * M_PI / 180.0);
   uint32_t meters = 0;
   for (int i = 1; i < s_pathN; i++) {
-    double dLat = (s_path[i].lat - s_path[i - 1].lat) / ((GRID_LAT1 - GRID_LAT0) / (GRID_H - 1)) * mppLat;
-    double dLon = (s_path[i].lon - s_path[i - 1].lon) / ((GRID_LON1 - GRID_LON0) / (GRID_W - 1)) * mppLon;
+    double dLat = (s_path[i].lat - s_path[i - 1].lat) / ((g_lat1 - g_lat0) / (GRID_H - 1)) * mppLat;
+    double dLon = (s_path[i].lon - s_path[i - 1].lon) / ((g_lon1 - g_lon0) / (GRID_W - 1)) * mppLon;
     meters += (uint32_t)lround(sqrt(dLat * dLat + dLon * dLon));
   }
 
@@ -261,10 +275,10 @@ static bool routing_compute(void)
  * on-device timing/memory so we can validate the engine without the UI. */
 void routing_selftest(void)
 {
-  s_startLat = GRID_LAT0 + 0.001; s_startLon = GRID_LON0 + 0.001;
-  s_stopLat  = GRID_LAT1 - 0.001; s_stopLon  = GRID_LON1 - 0.001;
+  s_startLat = g_lat0 + 0.001; s_startLon = g_lon0 + 0.001;
+  s_stopLat  = g_lat1 - 0.001; s_stopLon  = g_lon1 - 0.001;
   ESP_LOGI(TAG, "selftest: A* corner-to-corner of the %.1fkm x %.1fkm box",
-           (GRID_LON1 - GRID_LON0) * 109.3, (GRID_LAT1 - GRID_LAT0) * 111.3);
+           (g_lon1 - g_lon0) * 109.3, (g_lat1 - g_lat0) * 111.3);
   routing_compute();
 }
 
@@ -289,6 +303,7 @@ bool routing_handle_tap(int x, int y)
         y >= ROUTE_BTN_Y && y < ROUTE_BTN_Y + ROUTE_BTN_H) {
       s_mode = ROUTE_PICK_START;
       s_pathN = 0;
+      grid_recenter();   /* box follows the car so taps land on distinct nodes */
       /* routing needs the map: if we are in the text-only SIMPLE screen,
        * switch to FULL so the crosshairs + path are visible */
       if (ui_nav_mode() == UI_MODE_SIMPLE) ui_cycle_nav_mode();
@@ -313,7 +328,8 @@ bool routing_handle_tap(int x, int y)
     s_stopX = x; s_stopY = y;
     map_screen_to_latlon(x, y, &s_stopLat, &s_stopLon);
     s_mode = ROUTE_CONFIRM;
-    ESP_LOGI(TAG, "stop %.6f,%.6f - confirm", s_stopLat, s_stopLon);
+    ESP_LOGI(TAG, "stop %.6f,%.6f - computing preview", s_stopLat, s_stopLon);
+    routing_compute();   /* run A* now so the confirm dialog shows the real path */
     ui_mark_redraw();
     return true;
   }
@@ -341,14 +357,12 @@ bool routing_handle_tap(int x, int y)
 
 /* ---------------- drawing ---------------- */
 static void drawCrosshair(LGFX_Sprite &spr, int x, int y, uint16_t col) {
-  const int r = 18;                      /* big + obvious */
-  spr.drawCircle(x, y, r, col);
-  spr.drawCircle(x, y, r - 2, col);      /* thicker ring */
-  spr.drawLine(x - r - 6, y, x - r, y, col);   /* long arms */
-  spr.drawLine(x + r, y, x + r + 6, y, col);
-  spr.drawLine(x, y - r - 6, x, y - r, col);
-  spr.drawLine(x, y + r, x, y + r + 6, col);
-  spr.fillCircle(x, y, 3, TFT_WHITE);    /* bright centre dot */
+  const int L = 14;                      /* arm length */
+  for (int i = -1; i <= 1; i++) {        /* 3px thick + sign */
+    spr.drawLine(x - L, y + i, x + L, y + i, col);   /* horizontal bar */
+    spr.drawLine(x + i, y - L, x + i, y + L, col);   /* vertical bar */
+  }
+  spr.fillRect(x - 2, y - 2, 5, 5, TFT_WHITE);       /* centre */
 }
 
 static void drawStatus(LGFX_Sprite &spr, const char *txt) {
@@ -377,10 +391,10 @@ static void drawPathOverlay(LGFX_Sprite &spr) {
   }
   int sx, sy;
   map_latlon_to_screen(s_startLat, s_startLon, &sx, &sy);
-  spr.fillCircle(sx, sy, 5, TFT_GREEN);
+  spr.fillCircle(sx, sy, 5, ROUTE_COL_START);
   spr.drawCircle(sx, sy, 7, TFT_WHITE);
   map_latlon_to_screen(s_stopLat, s_stopLon, &sx, &sy);
-  spr.fillCircle(sx, sy, 5, TFT_RED);
+  spr.fillCircle(sx, sy, 5, ROUTE_COL_STOP);
   spr.drawCircle(sx, sy, 7, TFT_WHITE);
 }
 
@@ -402,13 +416,18 @@ void routing_draw_overlay(LGFX_Sprite &spr)
     return;
   case ROUTE_PICK_STOP:
     drawStatus(spr, "PICK STOP");
-    if (s_startX >= 0) drawCrosshair(spr, s_startX, s_startY, TFT_GREEN);
+    if (s_startX >= 0) drawCrosshair(spr, s_startX, s_startY, ROUTE_COL_START);
     return;
   case ROUTE_CONFIRM: {
-    drawStatus(spr, "CONFIRM");
+    char conf[48];
+    if (s_pathN >= 2)
+      snprintf(conf, sizeof conf, "CONFIRM - %u pts, %u m", s_pathN, (unsigned)s_lastDistM);
+    else
+      snprintf(conf, sizeof conf, "CONFIRM");
+    drawStatus(spr, conf);
     drawPathOverlay(spr);   /* preview the route before confirming */
-    if (s_startX >= 0) drawCrosshair(spr, s_startX, s_startY, TFT_GREEN);
-    if (s_stopX >= 0)  drawCrosshair(spr, s_stopX,  s_stopY,  TFT_RED);
+    if (s_startX >= 0) drawCrosshair(spr, s_startX, s_startY, ROUTE_COL_START);
+    if (s_stopX >= 0)  drawCrosshair(spr, s_stopX,  s_stopY,  ROUTE_COL_STOP);
     const uint16_t dlg = spr.color565(22, 24, 30);
     spr.fillRoundRect(PROMPT_X, PROMPT_Y, PROMPT_W, PROMPT_H, 6, dlg);
     spr.drawRoundRect(PROMPT_X, PROMPT_Y, PROMPT_W, PROMPT_H, 6, TFT_WHITE);
