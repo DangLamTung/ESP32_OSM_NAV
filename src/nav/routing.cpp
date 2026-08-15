@@ -106,68 +106,41 @@ static uint32_t heuristic(int col, int row, int tCol, int tRow) {
   return (uint32_t)(10 * (dr + dc - 2 * mn) + 14 * mn);
 }
 
-/* (re)build the synthetic test grid — the fallback used when the real graph
- * is not loaded (offline routing OFF). Returns false on OOM. */
-static bool synthetic_alloc(void)
-{
-  g_dist    = (uint32_t *)heap_caps_malloc(GRID_N * sizeof(uint32_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  g_f       = (uint32_t *)heap_caps_malloc(GRID_N * sizeof(uint32_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  g_prev    = (int32_t  *)heap_caps_malloc(GRID_N * sizeof(int32_t),  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  g_closed  = (uint8_t  *)heap_caps_malloc(GRID_N * sizeof(uint8_t),  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  g_heap    = (int32_t  *)heap_caps_malloc(GRID_N * sizeof(int32_t),  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  g_heapPos = (int32_t  *)heap_caps_malloc(GRID_N * sizeof(int32_t),  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (!g_dist || !g_f || !g_prev || !g_closed || !g_heap || !g_heapPos) {
-    ESP_LOGE(TAG, "failed to allocate A* arrays (%u nodes)", (unsigned)GRID_N);
-    return false;
-  }
-  grid_recenter();
-  ESP_LOGI(TAG, "test grid %dx%d = %u nodes, arrays %.1f KB PSRAM, box %.1fx%.1f km",
-           GRID_W, GRID_H, (unsigned)GRID_N,
-           (double)(GRID_N * (4 + 4 + 4 + 1 + 4 + 4)) / 1024.0,
-           (g_lon1 - g_lon0) * 109.3, (g_lat1 - g_lat0) * 111.3);
-  return true;
-}
-
-static void synthetic_free(void)
-{
-  free(g_dist); free(g_f); free(g_prev); free(g_closed); free(g_heap); free(g_heapPos);
-  g_dist = NULL; g_f = NULL; g_prev = NULL; g_heap = NULL; g_heapPos = NULL; g_closed = NULL;
-}
-
 void routing_init(void)
 {
   s_rlat = (double *)heap_caps_malloc(MAX_PATH_PTS * sizeof(double), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   s_rlon = (double *)heap_caps_malloc(MAX_PATH_PTS * sizeof(double), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!s_rlat) s_rlat = (double *)malloc(MAX_PATH_PTS * sizeof(double));
   if (!s_rlon) s_rlon = (double *)malloc(MAX_PATH_PTS * sizeof(double));
-  synthetic_alloc();   /* fallback grid; the real graph loads via routing_set_offline */
+  /* no synthetic grid: the ROUTE feature is gated on the real graph, which is
+   * loaded by routing_set_offline() (OFFLINE RTE setting) */
 }
 
 /* Enable/disable offline (real-road) routing at runtime. ON loads the graph
- * from SD and frees the synthetic grid; OFF unloads it (faster boot, less
- * PSRAM when offline routing isn't needed). Called from the settings panel
- * and from setup() with the persisted setting. */
+ * from SD; OFF unloads it (faster boot, less PSRAM). The ROUTE button is
+ * disabled entirely when the real graph isn't active. Called from the
+ * settings panel and from setup() with the persisted setting. */
 void routing_set_offline(bool on)
 {
   if (on == s_useReal)
     return;
   if (on) {
-    synthetic_free();   /* make room FIRST so the real A* arrays fit */
     if (rg_load("/sdcard/routing.rng") && rg_astar_init()) {
       s_useReal = true;
       ESP_LOGI(TAG, "offline routing ON: real graph active (%u nodes)",
                (unsigned)rg_node_count());
     } else {
       rg_unload();
-      synthetic_alloc();   /* keep the fallback grid working */
-      ESP_LOGE(TAG, "offline routing ON but graph load failed - synthetic grid");
+      s_useReal = false;
+      s_mode = ROUTE_IDLE;
+      ESP_LOGE(TAG, "offline routing ON but graph load failed - ROUTE disabled");
     }
   } else {
     rg_unload();
     s_useReal = false;
+    s_mode = ROUTE_IDLE;   /* exit any in-progress route */
     s_pathN = 0;
-    synthetic_alloc();
-    ESP_LOGI(TAG, "offline routing OFF - synthetic grid");
+    ESP_LOGI(TAG, "offline routing OFF - ROUTE disabled");
   }
   ui_mark_redraw();
 }
@@ -216,8 +189,14 @@ static void heapDecreaseKey(int32_t node) {
 /* ---------------- A* ---------------- */
 static bool routing_compute(void)
 {
+  /* the ROUTE feature only works with the real graph active (OFFLINE RTE on) */
+  if (!s_useReal) {
+    s_pathN = 0;
+    return false;
+  }
+
   /* ---- real OSM road network (from SD) ---- */
-  if (s_useReal) {
+  {
     double distM = 0.0;
     uint32_t ms = 0;
     int n = rg_route(s_startLat, s_startLon, s_stopLat, s_stopLon,
@@ -236,7 +215,9 @@ static bool routing_compute(void)
     return false;
   }
 
-  /* ---- synthetic test grid (fallback) ---- */
+  /* ---- synthetic test grid (kept as unreachable fallback code so the A*
+   * helpers stay referenced; the guard above returns before this when the
+   * real graph is inactive) ---- */
   int sCol = colOf(s_startLon), sRow = rowOf(s_startLat);
   int tCol = colOf(s_stopLon),  tRow = rowOf(s_stopLat);
   int start = idx(sCol, sRow), stop = idx(tCol, tRow);
@@ -331,26 +312,23 @@ static bool routing_compute(void)
   return true;
 }
 
-/* Boot self-test: A* corner-to-corner of the test grid box, logs the real
- * on-device timing/memory so we can validate the engine without the UI. */
+/* Boot self-test: route across the loaded graph window and log the real
+ * on-device timing. Skipped when offline routing is off. */
 void routing_selftest(void)
 {
-  if (s_useReal) {
-    /* route between two CENTRAL points (35% / 65% across the box) so both
-     * ends are in the main connected component — corner-to-corner can hit
-     * bbox-truncation islands and report a bogus no-path. */
-    double mnla, mnlo, mxla, mxlo;
-    rg_bbox(&mnla, &mnlo, &mxla, &mxlo);
-    s_startLat = mnla + (mxla - mnla) * 0.35; s_startLon = mnlo + (mxlo - mnlo) * 0.35;
-    s_stopLat  = mnla + (mxla - mnla) * 0.65; s_stopLon  = mnlo + (mxlo - mnlo) * 0.65;
-    ESP_LOGI(TAG, "selftest: real graph center route (%.4f,%.4f)->(%.4f,%.4f)",
-             s_startLat, s_startLon, s_stopLat, s_stopLon);
-  } else {
-    s_startLat = g_lat0 + 0.001; s_startLon = g_lon0 + 0.001;
-    s_stopLat  = g_lat1 - 0.001; s_stopLon  = g_lon1 - 0.001;
-    ESP_LOGI(TAG, "selftest: A* corner-to-corner of the %.1fkm x %.1fkm box",
-             (g_lon1 - g_lon0) * 109.3, (g_lat1 - g_lat0) * 111.3);
+  if (!s_useReal) {
+    ESP_LOGI(TAG, "offline routing off - routing selftest skipped");
+    return;
   }
+  /* route between two CENTRAL points (35% / 65% across the window) so both
+   * ends are in the main connected component — corner-to-corner can hit
+   * bbox-truncation islands and report a bogus no-path. */
+  double mnla, mnlo, mxla, mxlo;
+  rg_bbox(&mnla, &mnlo, &mxla, &mxlo);
+  s_startLat = mnla + (mxla - mnla) * 0.35; s_startLon = mnlo + (mxlo - mnlo) * 0.35;
+  s_stopLat  = mnla + (mxla - mnla) * 0.65; s_stopLon  = mnlo + (mxlo - mnlo) * 0.65;
+  ESP_LOGI(TAG, "selftest: real graph center route (%.4f,%.4f)->(%.4f,%.4f)",
+           s_startLat, s_startLon, s_stopLat, s_stopLon);
   routing_compute();
 }
 
@@ -370,8 +348,8 @@ static void routing_reload_window(void)
     ESP_LOGI(TAG, "window reloaded around (%.4f,%.4f) - %u nodes",
              centerLat, centerLon, (unsigned)rg_node_count());
   } else {
-    rg_unload(); s_useReal = false; synthetic_alloc();
-    ESP_LOGE(TAG, "window reload failed - synthetic grid");
+    rg_unload(); s_useReal = false; s_mode = ROUTE_IDLE;
+    ESP_LOGE(TAG, "window reload failed - ROUTE disabled");
   }
   ui_mark_redraw();
 }
@@ -402,9 +380,14 @@ bool routing_handle_tap(int x, int y)
 {
   ESP_LOGI(TAG, "tap(%d,%d) mode=%d", x, y, (int)s_mode);   /* DEBUG: watch taps */
   if (s_mode == ROUTE_IDLE) {
-    /* only the ROUTE button is consumed while idle */
+    /* only the ROUTE button is consumed while idle; disabled unless the real
+     * graph is active (OFFLINE RTE on) */
     if (x >= ROUTE_BTN_X && x < ROUTE_BTN_X + ROUTE_BTN_W &&
         y >= ROUTE_BTN_Y && y < ROUTE_BTN_Y + ROUTE_BTN_H) {
+      if (!s_useReal) {
+        ESP_LOGI(TAG, "route disabled (offline routing off)");
+        return true;   /* consume; do nothing */
+      }
       routing_reload_window();   /* pan-to-anywhere support */
       s_mode = ROUTE_PICK_START;
       s_pathN = 0;
@@ -447,6 +430,7 @@ bool routing_handle_tap(int x, int y)
    * tap cleared the path, so zooming in deleted the route. */
   if (x >= ROUTE_BTN_X && x < ROUTE_BTN_X + ROUTE_BTN_W &&
       y >= ROUTE_BTN_Y && y < ROUTE_BTN_Y + ROUTE_BTN_H) {
+    if (!s_useReal) return true;   /* disabled unless the real graph is active */
     routing_reload_window();   /* pan-to-anywhere support */
     s_mode = ROUTE_PICK_START;
     s_pathN = 0;
@@ -511,14 +495,19 @@ static void drawPathOverlay(LGFX_Sprite &spr) {
 
 void routing_draw_overlay(LGFX_Sprite &spr)
 {
-  /* ROUTE button (always visible) */
-  uint16_t bg = (s_mode != ROUTE_IDLE) ? spr.color565(40, 150, 70) : spr.color565(70, 74, 82);
+  /* ROUTE button (always visible; dimmed + "ROUTE OFF" when the real graph
+   * isn't loaded — the feature is fully disabled then) */
+  uint16_t bg;
+  if (!s_useReal)
+    bg = spr.color565(48, 50, 56);
+  else
+    bg = (s_mode != ROUTE_IDLE) ? spr.color565(40, 150, 70) : spr.color565(70, 74, 82);
   spr.fillRoundRect(ROUTE_BTN_X, ROUTE_BTN_Y, ROUTE_BTN_W, ROUTE_BTN_H, 4, bg);
   spr.drawRoundRect(ROUTE_BTN_X, ROUTE_BTN_Y, ROUTE_BTN_W, ROUTE_BTN_H, 4, TFT_BLACK);
   spr.setTextColor(TFT_WHITE, bg);
   spr.setTextFont(1);
   spr.setCursor(ROUTE_BTN_X + 4, ROUTE_BTN_Y + 7);
-  spr.print("ROUTE");
+  spr.print(s_useReal ? "ROUTE" : "OFF");
   spr.setTextFont(1);
 
   switch (s_mode) {
