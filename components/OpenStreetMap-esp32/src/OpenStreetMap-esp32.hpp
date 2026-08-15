@@ -41,9 +41,9 @@
 
 constexpr uint16_t OSM_BGCOLOR = lgfx::color565(32, 32, 128);
 constexpr UBaseType_t OSM_TASK_PRIORITY = 1;
-constexpr uint32_t OSM_TASK_STACKSIZE = 6144;
+constexpr uint32_t OSM_TASK_STACKSIZE = 16384;
 constexpr uint32_t OSM_JOB_QUEUE_SIZE = 50;
-constexpr bool OSM_FORCE_SINGLECORE = false;
+constexpr bool OSM_FORCE_SINGLECORE = true;   /* 1 worker: avoids a FreeRTOS priority-inheritance race on 2 cores */
 constexpr int OSM_SINGLECORE_NUMBER = 1;
 
 static_assert(OSM_SINGLECORE_NUMBER < 2, "OSM_SINGLECORE_NUMBER must be 0 or 1 (ESP32 has only 2 cores)");
@@ -90,10 +90,15 @@ public:
     uint16_t tilesNeeded(uint16_t mapWidth, uint16_t mapHeight);
     bool resizeTilesCache(uint16_t numberOfTiles);
     bool fetchMap(LGFX_Sprite &sprite, double longitude, double latitude, uint8_t zoom, unsigned long timeoutMS = 0);
+    /* Preload tiles around a point into the cache WITHOUT composing a sprite.
+     * Used to warm the cache ahead of the car so the display fetch never has
+     * to read a tile from SD mid-frame (kills the leading-edge stutter). */
+    void prefetchTiles(double longitude, double latitude, uint8_t zoom);
     inline void freeTilesCache();
 
     bool setTileProvider(int index);
     const char *getProviderName() { return currentProvider->name; };
+    const char *getAttribution() { return currentProvider->attribution; };
     int getMinZoom() const { return currentProvider->minZoom; };
     int getMaxZoom() const { return currentProvider->maxZoom; };
 
@@ -113,7 +118,7 @@ private:
     void runJobs(const std::vector<TileJob> &jobs);
     CachedTile *findUnusedTile(const tileList &requiredTiles, uint8_t zoom);
     CachedTile *isTileCached(uint32_t x, uint32_t y, uint8_t z);
-    bool fetchTile(ReusableTileFetcher &fetcher, CachedTile &tile, uint32_t x, uint32_t y, uint8_t zoom, String &result, unsigned long timeoutMS);
+    bool fetchTile(ReusableTileFetcher *fetcher, CachedTile &tile, uint32_t x, uint32_t y, uint8_t zoom, String &result, unsigned long timeoutMS);
     bool composeMap(LGFX_Sprite &mapSprite, TileBufferList &tilePointers);
     static void tileFetcherTask(void *param);
     static void PNGDraw(PNGDRAW *pDraw);

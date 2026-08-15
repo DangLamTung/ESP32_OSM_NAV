@@ -26,40 +26,59 @@ static bool     s_touching = false;
 static bool     s_dragging = false;
 static int      s_downX = 0, s_downY = 0;
 static uint32_t s_downMS = 0;
+static bool     s_sliderDrag = false;   /* current drag is on the brightness slider */
 static const int DRAG_THRESHOLD = 6;   /* px; finger must move this far to pan */
 
 /* hit-test buttons at tap position (x, y); returns true if consumed */
 static bool handleTap(int x, int y)
 {
-    /* top-right corner = toggle the BLE scan list ("place" list) - no re-fetch */
-    if (x >= SCAN_BTN_X && y <= SCAN_TAP_Y_MAX)
+    /* settings panel consumes taps inside/around it first */
+    if (ui_settings_open())
+        return ui_settings_tap(x, y);
+
+    /* rotate button (left edge): turn the map ROTATE_STEP_DEG clockwise.
+     * Manual rotation switches off heading-up mode. */
+    if (x >= ROTATE_BTN_X && x < ROTATE_BTN_X + ROTATE_BTN_W &&
+        y >= ROTATE_BTN_Y && y < ROTATE_BTN_Y + ROTATE_BTN_H)
     {
-        ui_toggle_scan();
+        map_rotate(ROTATE_STEP_DEG);
         return true;
     }
-    /* tile-source mode button (below SCAN) - cycles + relabels, no refresh */
-    if (!ui_scan_shown() &&
-        x >= MODE_BTN_X && x < MODE_BTN_X + MODE_BTN_W &&
-        y >= MODE_BTN_Y && y < MODE_BTN_Y + MODE_BTN_H)
+    /* heading-up toggle (left edge, under rotate): map follows GPS heading */
+    if (x >= HDG_BTN_X && x < HDG_BTN_X + HDG_BTN_W &&
+        y >= HDG_BTN_Y && y < HDG_BTN_Y + HDG_BTN_H)
     {
-        map_cycle_tile_mode();
-        ui_mark_redraw();
+        map_set_heading_up(!map_heading_up());
         return true;
     }
-    /* zoom-in "+" button (bottom-right) */
-    if (!ui_scan_shown() &&
-        x >= ZOOM_IN_X && x < ZOOM_IN_X + ZOOM_BTN_W &&
+    /* center button (left edge, under heading): snap the view onto the car */
+    if (x >= CENTER_BTN_X && x < CENTER_BTN_X + CENTER_BTN_W &&
+        y >= CENTER_BTN_Y && y < CENTER_BTN_Y + CENTER_BTN_H)
+    {
+        ui_recenter();
+        return true;
+    }
+
+    /* top-right corner = settings (gear) */
+    if (x >= GEAR_BTN_X && y < GEAR_BTN_Y + GEAR_BTN_H)
+    {
+        ui_toggle_settings();
+        return true;
+    }
+    /* zoom-in "+" button (bottom-right) — disabled at ZOOM_MAX */
+    if (x >= ZOOM_IN_X && x < ZOOM_IN_X + ZOOM_BTN_W &&
         y >= ZOOM_IN_Y && y < ZOOM_IN_Y + ZOOM_BTN_H)
     {
-        map_zoom(+1);
+        if (ZOOM < ZOOM_MAX)
+            map_zoom(+1);
         return true;
     }
-    /* zoom-out "-" button (bottom-right) */
-    if (!ui_scan_shown() &&
-        x >= ZOOM_OUT_X && x < ZOOM_OUT_X + ZOOM_BTN_W &&
+    /* zoom-out "-" button (bottom-right) — disabled at ZOOM_MIN */
+    if (x >= ZOOM_OUT_X && x < ZOOM_OUT_X + ZOOM_BTN_W &&
         y >= ZOOM_OUT_Y && y < ZOOM_OUT_Y + ZOOM_BTN_H)
     {
-        map_zoom(-1);
+        if (ZOOM > ZOOM_MIN)
+            map_zoom(-1);
         return true;
     }
     return false;
@@ -83,6 +102,7 @@ void input_touch_poll(void)
         }
         s_touching = false;
         s_dragging = false;
+        s_sliderDrag = false;
         s_lastTX = s_lastTY = -1;
         return;
     }
@@ -94,6 +114,7 @@ void input_touch_poll(void)
     {
         s_touching = true;
         s_dragging = false;
+        s_sliderDrag = false;
         s_downX = x;
         s_downY = y;
         s_downMS = millis();
@@ -128,10 +149,14 @@ void input_touch_poll(void)
             return;                 /* still within tap tolerance: no pan */
         }
         s_dragging = true;          /* finger moved enough -> real drag */
+        s_sliderDrag = ui_settings_drag_started(s_downX, s_downY);
         s_lastTX = s_downX;         /* anchor the pan where the press started */
         s_lastTY = s_downY;
     }
-    map_pan(x - s_lastTX, y - s_lastTY);
+    if (s_sliderDrag)
+        ui_settings_slider_drag(x);      /* live brightness while dragging */
+    else
+        map_pan(x - s_lastTX, y - s_lastTY);
     s_lastTX = x;
     s_lastTY = y;
 }

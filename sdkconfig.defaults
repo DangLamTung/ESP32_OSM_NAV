@@ -2,6 +2,12 @@
 # Target
 CONFIG_IDF_TARGET="esp32s3"
 
+# CPU 240 MHz — REQUIRED for the ESP32-S3 Bluetooth controller (BLE asserts at 160)
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
+CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240=y
+CONFIG_ESP32S3_DEFAULT_CPU_FREQ_MHZ=240
+
 # WiFi
 CONFIG_ESP_WIFI_SSID=""
 CONFIG_ESP_WIFI_PASSWORD=""
@@ -19,7 +25,21 @@ CONFIG_SPI_MASTER_IN_IRAM=y
 CONFIG_SPI_MASTER_ISR_IN_IRAM=y
 
 # Main task stack (WiFi + HTTP + JPEG rendering)
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=65536
+# Interrupt WDT: 300ms was tripping "Interrupt wdt timeout on CPU0" when a
+# BLE route write triggered a PSRAM draw burst on core 1 (stalls core 0's BLE
+# controller ISR past the threshold). 5s keeps a safety net without false resets.
+CONFIG_ESP_INT_WDT_TIMEOUT_MS=5000
+CONFIG_INT_WDT_TIMEOUT_MS=5000
+# BLE 5.0 controller features disabled: they caused a stuck BLE link-layer ISR
+# (r_lld_con_rx_hack) -> "Interrupt wdt timeout on CPU0" when a route arrived
+# over BLE. Basic GATT (connect/read/write) only needs 4.2 mode.
+# CONFIG_BT_BLE_50_FEATURES_SUPPORTED is not set
+# BLE SMP/bonding disabled: Bluedroid's bond storage in NVS was crashing on
+# corrupt NVS data (Core-0 LoadProhibited in nvs_open). Web client needs no
+# pairing, so the whole SMP path is off.
+# CONFIG_BT_BLE_SMP_ENABLE is not set
+# CONFIG_BT_BLE_SMP_BOND_NVS_FLASH is not set
 
 # Enable large HTTP downloads
 CONFIG_ESP_HTTP_CLIENT_ENABLE_DIGEST_AUTH=n

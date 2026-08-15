@@ -43,9 +43,17 @@
 <main>
   <!-- LEFT: route / drive simulation -->
   <section>
+    <div class="panel" style="border-color:var(--ok)">
+      <h2>🚀 One-click navigation</h2>
+      <p class="hint" style="margin:0">One button sends <b>all</b> the BLE the board needs — route (first 64-point batch), position at the route start, next-turn nav, clock and ETA — then drives the full route. Auto-connects first if needed.</p>
+      <div class="row">
+        <button id="btnNavAll" style="flex:1; padding:12px; font-size:15px">🚀 Start navigation — send all + drive</button>
+      </div>
+    </div>
+
     <div class="panel">
       <h2>1 · Route</h2>
-      <label>Route XML <span class="hint">(route around Bến Thành, z15)</span></label>
+      <label>Route XML <span class="hint">(Bến Thành → Vũng Tàu, z15)</span></label>
       <textarea id="routeXml"></textarea>
       <div class="row">
         <button id="btnSample">Load sample route</button>
@@ -54,10 +62,11 @@
     </div>
 
     <div class="panel" style="margin-top:16px">
-      <h2>2 · Drive simulation (live position)</h2>
-      <p class="hint" style="margin:0">Steps the vehicle along the route at 1 Hz and sends <code>&lt;pos&gt;</code> packets so you can watch the map follow.</p>
+      <h2>2 · Drive simulation (follows the route path)</h2>
+      <p class="hint" style="margin:0">Interpolates the vehicle <b>along the full route</b> and sends <code>&lt;pos&gt;</code> packets ~10&times;/s (kept low so the board's BLE/redraw stays stable). The board interpolates + extrapolates, so the map scrolls <b>continuously</b>. Long roads are <b>streamed in 64-point batches</b> that advance as you drive. <code>×</code> is a time-lapse multiplier — lower it if the movement looks too fast.</p>
       <div class="row">
-        <label style="margin:0">Speed (km/h) <input type="number" id="simSpd" value="30" min="0" max="200" /></label>
+        <label style="margin:0">Speed (km/h) <input type="number" id="simSpd" value="40" min="0" max="200" /></label>
+        <label style="margin:0">× time-lapse <input type="number" id="simMult" value="3" min="1" max="1000" /></label>
         <button id="btnSim">Start simulate</button>
         <button id="btnStopSim" class="ghost" disabled>Stop</button>
       </div>
@@ -76,10 +85,54 @@
         <button id="btnMan">Send nav</button>
       </div>
       <div class="row">
+        <label style="margin:0">Next-next <select id="man2Type">
+          <option>straight</option><option>left</option><option>right</option>
+          <option>slight-left</option><option>slight-right</option>
+          <option>u-turn</option><option>roundabout</option><option>arrive</option>
+        </select></label>
+        <label style="margin:0">Dist m <input type="number" id="man2Dist" value="1200" /></label>
+        <label style="margin:0">Street <input type="text" id="man2Street" value="QL51" style="width:120px" /></label>
+        <button id="btnMan2">Send nav2</button>
+      </div>
+      <div class="row">
         <label style="margin:0">Lat <input type="number" id="posLat" step="0.00001" value="10.77180" /></label>
         <label style="margin:0">Lon <input type="number" id="posLon" step="0.00001" value="106.69820" /></label>
         <label style="margin:0">Hdg <input type="number" id="posHdg" value="312" min="0" max="359" /></label>
+        <label style="margin:0">SL km/h <input type="number" id="posLimit" value="50" min="0" max="200" /></label>
         <button id="btnPos">Send pos</button>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:16px">
+      <h2>4 · Time + ETA (HUD)</h2>
+      <p class="hint" style="margin:0">Current time (<code>&lt;clock&gt;</code>) and ETA (<code>&lt;eta&gt;</code>) shown in the board's top HUD.</p>
+      <div class="row">
+        <label style="margin:0">Time <input type="number" id="clkH" value="14" min="0" max="23" style="width:64px" />:<input type="number" id="clkM" value="30" min="0" max="59" style="width:64px" /></label>
+        <button id="btnClock" class="ghost">Send time</button>
+      </div>
+      <div class="row">
+        <label style="margin:0">ETA <input type="number" id="etaH" value="14" min="0" max="23" style="width:64px" />:<input type="number" id="etaM" value="32" min="0" max="59" style="width:64px" /></label>
+        <label style="margin:0">Arrive <input type="text" id="etaA" value="Ben Thanh" style="width:110px" /></label>
+        <button id="btnEta" class="ghost">Send eta</button>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:16px">
+      <h2>5 · Weather (HUD)</h2>
+      <p class="hint" style="margin:0">Sends a <code>&lt;weather&gt;</code> packet shown in the board's weather widget (top-right). During a drive it's sent once with the navigation start.</p>
+      <div class="row">
+        <label style="margin:0">Temp °C <input type="number" id="wxT" value="32" min="-20" max="50" /></label>
+        <label style="margin:0">Hum % <input type="number" id="wxH" value="75" min="0" max="100" /></label>
+        <label style="margin:0">Code <select id="wxCode">
+          <option value="0">Clear</option>
+          <option value="2">Partly/Overcast</option>
+          <option value="45">Fog</option>
+          <option value="61">Rain</option>
+          <option value="80">Showers</option>
+          <option value="95">Storm</option>
+        </select></label>
+        <label style="margin:0">Text <input type="text" id="wxTxt" value="Nắng nóng" style="width:110px" /></label>
+        <button id="btnWeather">Send weather</button>
       </div>
     </div>
   </section>
@@ -121,7 +174,8 @@ function setConn(on) {
   $("btnDisconnect").disabled = !on;
 }
 
-$("btnConnect").onclick = async () => {
+async function connectNav() {
+  if (chr) return true;                       // already connected
   try {
     const dev = await navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE] }] });
     log(`device: ${dev.name || dev.id}`, "sys");
@@ -130,60 +184,347 @@ $("btnConnect").onclick = async () => {
     chr = await svc.getCharacteristic(CHAR);
     const val = await chr.readValue();
     log(`connected · board says: "${new TextDecoder().decode(val)}"`, "sys");
-    chr.addEventListener("characteristicvaluechanged", e =>
-      log("notify: " + new TextDecoder().decode(e.target.value), "sys"));
-    await chr.startNotifications();
+    // NOTE: we deliberately do NOT call startNotifications(). The board never
+    // notifies (client only writes), and in VS Code/Electron Web Bluetooth a
+    // failed CCCD subscribe can destabilise the link and drop the connection.
+    // Native Chrome supports it, but it's pointless here — skip it entirely.
     setConn(true);
+    return true;
   } catch (e) {
     log("connect failed: " + e.message, "err");
+    return false;
   }
-};
+}
+$("btnConnect").onclick = () => connectNav();
 
 $("btnDisconnect").onclick = async () => {
   try { if (server && server.connected) await server.disconnect(); } catch {}
   server = null; chr = null; setConn(false); log("disconnected", "sys");
 };
 
+/* ---- BLE write serialization ----
+ * Web Bluetooth throws "GATT operation already in progress" if writeValue()
+ * is issued while the previous write (write-with-response waits for the board's
+ * ACK) is still pending. The sim can fire a new packet before the previous
+ * tick's sends finished (a tick also sends a big 256-pt route in 3 chunks), so
+ * EVERY write goes through this chain: each write waits for the one before it. */
+let s_writeChain = Promise.resolve();
+function enqueueWrite(bytes) {
+  const op = s_writeChain.then(() => chr.writeValue(bytes));
+  s_writeChain = op.catch(() => {});   // keep the chain alive if a write fails
+  return op;
+}
+
 async function send(packet) {
   if (!chr) { log("not connected yet", "err"); return; }
+  const MAX = 500;   // keep each BLE write under the 512-byte MTU limit
   try {
     // append a 0x00 terminator — the board finalizes packets on it
     const bytes = new Uint8Array(packet.length + 1);
     for (let i = 0; i < packet.length; i++) bytes[i] = packet.charCodeAt(i) & 0xff;
     bytes[packet.length] = 0;
-    await chr.writeValue(bytes);
-    log("> " + packet, "sent");
+    // big packets (e.g. a route) are split into chunks; the board accumulates
+    // them in its RX buffer until it sees the closing tag / 0x00 terminator
+    if (bytes.length <= MAX) {
+      await enqueueWrite(bytes);
+    } else {
+      const n = Math.ceil(bytes.length / MAX);
+      for (let i = 0; i < n; i++) {
+        const hi = Math.min(bytes.length, (i + 1) * MAX);
+        await enqueueWrite(bytes.slice(i * MAX, hi));
+      }
+      log(`> ${packet.length} B sent in ${n} chunks`, "sent");
+    }
+    log("> " + packet.slice(0, 60) + (packet.length > 60 ? "…" : ""), "sent");
   } catch (e) { log("send failed: " + e.message, "err"); }
 }
 
-// ---- sample route: rectangle loop around Bến Thành (z15) ----
-function sampleRoute() {
-  const c = { lat: 10.7718, lon: 106.6982 };
-  const dLat = 0.012, dLon = 0.018, n = 12;
-  const pts = [];
-  const push = (lat, lon) => pts.push({ lat, lon });
-  for (let i = 0; i <= n; i++) push(c.lat - dLat + (2 * dLat) * i / n, c.lon - dLon);
-  for (let i = 1; i <= n; i++) push(c.lat + dLat, c.lon - dLon + (2 * dLon) * i / n);
-  for (let i = 1; i <= n; i++) push(c.lat + dLat - (2 * dLat) * i / n, c.lon + dLon);
-  for (let i = 1; i <  n; i++) push(c.lat - dLat, c.lon + dLon - (2 * dLon) * i / n);
+/* ---- binary protocol (compact, replaces XML) ----
+ * frame: [0xAA 0x55] type len_lo len_hi payload   (little-endian)
+ *   0x01 route: zoom(u8) count(u16) lat0/lon0(i32 x1e7) + deltas(i16 x1e5)
+ *   0x02 pos  : lat(i32 x1e7) lon(i32 x1e7) spd(u8) hdg(u16) sl(u8)
+ *   0x03 nav  : dist(u16) modId(u8) slen(u8) street (UTF-8)
+ *   0x04 eta  : h(u8) m(u8) alen(u8) arrive (UTF-8)
+ *   0x05 clock: h(u8) m(u8)
+ */
+const BIN_T = { ROUTE: 0x01, POS: 0x02, NAV: 0x03, ETA: 0x04, CLOCK: 0x05, WEATHER: 0x07, NAV2: 0x08 };
+const MANEUVER_ID = { straight: 0, left: 1, right: 2, "slight-left": 3, "slight-right": 4, "u-turn": 5, roundabout: 6, arrive: 7 };
+
+function binFrame(type, payload) {
+  const b = new Uint8Array(5 + payload.length);
+  b[0] = 0xAA; b[1] = 0x55; b[2] = type;
+  b[3] = payload.length & 0xff; b[4] = (payload.length >> 8) & 0xff;
+  b.set(payload, 5);
+  return b;
+}
+const MAX_ROUTE_PTS = 256;  // matches the board's NAV_MAX_ROUTE_POINTS (256)
+/* Road kept BEHIND the car: ~350m is the requested tail length. behindStart()
+ * walks back over the ACTUAL route points until ~ROUTE_BEHIND_M is covered, so
+ * the tail stays ~350m regardless of point spacing (dense city vs highway). */
+const ROUTE_BEHIND_M = 350;
+function behindStart(carIdx) {
+  let m = 0, i = carIdx;
+  while (i > 0 && m < ROUTE_BEHIND_M) { i--; m += distMeters(fullRoutePts[i], fullRoutePts[i + 1]); }
+  return Math.max(0, i);
+}
+function trimRoute(pts, n) { return pts.slice(0, Math.max(2, Math.min(n, pts.length))); }
+// spread a long polyline evenly over ≤ n points so a full longer trip fits the 64-pt limit
+function decimate(pts, n) {
+  if (pts.length <= n) return pts;
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const idx = Math.round(i * (pts.length - 1) / (n - 1));
+    out.push(pts[Math.min(idx, pts.length - 1)]);
+  }
+  return out;
+}
+
+
+function encRoute(pts, zoom) {
+  const n = Math.max(2, Math.min(pts.length, 512));
+  const p = new Uint8Array(3 + 8 + (n - 1) * 4);
+  const v = new DataView(p.buffer);
+  v.setUint8(0, zoom || 15);
+  v.setUint16(1, n, true);
+  let lat = Math.round(pts[0].lat * 1e7), lon = Math.round(pts[0].lon * 1e7);
+  v.setInt32(3, lat, true); v.setInt32(7, lon, true);
+  for (let i = 1; i < n; i++) {
+    const la = Math.round(pts[i].lat * 1e7), lo = Math.round(pts[i].lon * 1e7);
+    let dl = Math.round((la - lat) / 100), dn = Math.round((lo - lon) / 100);
+    dl = Math.max(-32768, Math.min(32767, dl));
+    dn = Math.max(-32768, Math.min(32767, dn));
+    v.setInt16(11 + (i - 1) * 4, dl, true);
+    v.setInt16(13 + (i - 1) * 4, dn, true);
+    lat = la; lon = lo;
+  }
+  return binFrame(BIN_T.ROUTE, p);
+}
+function encPos(lat, lon, spd, hdg, sl) {
+  const p = new Uint8Array(12);
+  const v = new DataView(p.buffer);
+  v.setInt32(0, Math.round(lat * 1e7), true);
+  v.setInt32(4, Math.round(lon * 1e7), true);
+  p[8] = Math.max(0, Math.min(255, Math.round(spd) || 0));
+  v.setUint16(9, ((Math.round(hdg) % 360) + 360) % 360, true);
+  p[11] = Math.max(0, Math.min(255, Math.round(sl) || 0));
+  return binFrame(BIN_T.POS, p);
+}
+/* ---- street-name shortening (SENDER-side: the board just displays) ----
+ * Long Vietnamese road names are abbreviated here before they go over BLE, so
+ * e.g. "Cao Tốc Hồ Chí Minh - Long Thành" becomes "CT HCM - LT". Word-level
+ * replacements first, then initials if it is still too long. */
+const NAME_MAP = [
+  [/Cao Tốc/gi, "CT"],
+  [/Quốc Lộ/gi, "QL"],
+  [/Hồ Chí Minh/gi, "HCM"],
+  [/Hà Nội/gi, "HN"],
+  [/Đà Nẵng/gi, "ĐN"],
+  [/Vũng Tàu/gi, "VT"],
+  [/Long Thành/gi, "LT"],
+  [/Biên Hòa/gi, "BH"],
+  [/Cần Thơ/gi, "CT"],
+  [/Đường/gi, "Đ"],
+  [/Ngã Tư/gi, "NT"],
+  [/Ngã Ba/gi, "NB"],
+  [/Trung Tâm/gi, "TT"],
+];
+function shortenName(name) {
+  if (!name) return name;
+  let s = name;
+  for (const [re, rep] of NAME_MAP) s = s.replace(re, rep);
+  s = s.replace(/\s+/g, " ").trim();
+  /* still too long? collapse to initials of the significant words */
+  if (s.length > 18) {
+    const words = s.split(/[\s\-–—/]+/).filter(Boolean);
+    const sig = words.filter(w => w.length > 1 && !/^(và|va|với|tới|ra|vào)$/i.test(w));
+    if (sig.length >= 2) s = sig.map(w => w[0].toUpperCase()).join("");
+  }
+  return s;
+}
+
+function encNavT(type, dist, man, street) {
+  const s = new TextEncoder().encode(shortenName(street) || "");
+  const p = new Uint8Array(4 + s.length);
+  const v = new DataView(p.buffer);
+  v.setUint16(0, Math.max(0, Math.min(65535, Math.round(dist) || 0)), true);
+  p[2] = (MANEUVER_ID[man] !== undefined) ? MANEUVER_ID[man] : 0;
+  p[3] = s.length; p.set(s, 4);
+  return binFrame(type, p);
+}
+function encNav(dist, man, street)  { return encNavT(BIN_T.NAV, dist, man, street); }
+function encNav2(dist, man, street) { return encNavT(BIN_T.NAV2, dist, man, street); }
+function encEta(h, m, arrive) {
+  const s = new TextEncoder().encode(arrive || "");
+  const p = new Uint8Array(3 + s.length);
+  p[0] = Math.max(0, Math.min(23, Math.round(h) || 0));
+  p[1] = Math.max(0, Math.min(59, Math.round(m) || 0));
+  p[2] = s.length; p.set(s, 3);
+  return binFrame(BIN_T.ETA, p);
+}
+function encClock(h, m) {
+  const p = new Uint8Array(2);
+  p[0] = Math.max(0, Math.min(23, Math.round(h) || 0));
+  p[1] = Math.max(0, Math.min(59, Math.round(m) || 0));
+  return binFrame(BIN_T.CLOCK, p);
+}
+/* 0x07 weather: tempC(s8) humidity(u8) code(u8) slen(u8) text[UTF-8] */
+function encWeather(tempC, humidity, code, text) {
+  const s = new TextEncoder().encode(text || "");
+  const p = new Uint8Array(4 + s.length);
+  p[0] = (Math.max(-128, Math.min(127, Math.round(tempC) || 0))) & 0xff;   /* s8 */
+  p[1] = Math.max(0, Math.min(255, Math.round(humidity) || 0));
+  p[2] = Math.max(0, Math.min(255, Math.round(code) || 0));
+  p[3] = s.length; p.set(s, 4);
+  return binFrame(BIN_T.WEATHER, p);
+}
+
+async function sendBytes(bytes) {
+  if (!chr) { log("not connected yet", "err"); return; }
+  const MAX = 500;   // keep each BLE write under the 512-byte MTU limit
+  try {
+    if (bytes.length <= MAX) {
+      await enqueueWrite(bytes);
+    } else {
+      const n = Math.ceil(bytes.length / MAX);
+      for (let i = 0; i < n; i++) {
+        const hi = Math.min(bytes.length, (i + 1) * MAX);
+        await enqueueWrite(bytes.slice(i * MAX, hi));
+      }
+      log(`> ${bytes.length} B binary sent in ${n} chunks`, "sent");
+    }
+    const name = Object.keys(BIN_T).find(k => BIN_T[k] === bytes[2]) || "?";
+    log(`> [bin ${name}] ${bytes.length} B`, "sent");
+  } catch (e) { log("send failed: " + e.message, "err"); }
+}
+
+// ---- sample route: REAL street-following path ahead from Bến Thành ----
+// The board is a "path ahead" display: it only draws the first 64 route points
+// (NAV_MAX_ROUTE_POINTS), and the offline tiles only cover a 5 km radius
+// around Bến Thành. So this is a SHORT (1.5 km) dense slice of the real OSRM
+// route (24 m spacing) that stays entirely inside the tiled area — it hugs the
+// z15 streets and the sim loops it for the rotation demo.
+const PATH_AHEAD = [
+  [10.771859, 106.698163], [10.771744, 106.697972], [10.771675, 106.697765], [10.771597, 106.697556],
+  [10.771509, 106.697350], [10.771421, 106.697145], [10.771333, 106.696939], [10.771238, 106.696737],
+  [10.771128, 106.696544], [10.771043, 106.696338], [10.770958, 106.696131], [10.770874, 106.695923],
+  [10.770789, 106.695716], [10.770704, 106.695509], [10.770619, 106.695302], [10.770534, 106.695095],
+  [10.770449, 106.694888], [10.770365, 106.694681], [10.770280, 106.694474], [10.770195, 106.694267],
+  [10.770088, 106.694126], [10.769896, 106.694237], [10.769707, 106.694352], [10.769518, 106.694467],
+  [10.769329, 106.694582], [10.769136, 106.694691], [10.768945, 106.694802], [10.768754, 106.694914],
+  [10.768563, 106.695025], [10.768371, 106.695136], [10.768178, 106.695245], [10.767995, 106.695354],
+  [10.767803, 106.695459], [10.767612, 106.695570], [10.767421, 106.695682], [10.767231, 106.695795],
+  [10.767044, 106.695914], [10.766854, 106.696028], [10.766662, 106.696138], [10.766470, 106.696248],
+  [10.766278, 106.696358], [10.766094, 106.696481], [10.765907, 106.696599], [10.765715, 106.696709],
+  [10.765525, 106.696823], [10.765337, 106.696939], [10.765138, 106.697017], [10.764930, 106.697089],
+  [10.764740, 106.697202], [10.764549, 106.697314], [10.764358, 106.697426], [10.764167, 106.697537],
+  [10.763980, 106.697655], [10.763807, 106.697792], [10.763644, 106.697943], [10.763733, 106.698083],
+  [10.763907, 106.698205], [10.764032, 106.698389], [10.764156, 106.698575], [10.764274, 106.698764],
+  [10.764392, 106.698953], [10.764523, 106.699134], [10.764655, 106.699313], [10.764787, 106.699493],
+];
+
+function sampleRoute() {   // fallback: dense street-following path ahead
+  return buildRouteXml(PATH_AHEAD.map(p => ({ lat: p[0], lon: p[1] })));
+}
+
+function buildRouteXml(pts) {
   return `<route z="15">` + pts.map(p => `<p lat="${p.lat.toFixed(6)}" lon="${p.lon.toFixed(6)}"/>`).join("") + `</route>`;
 }
 
-$("btnSample").onclick = () => { $("routeXml").value = sampleRoute(); log("sample route loaded", "sys"); };
+// real drivable route Bến Thành → Vũng Tàu via the OSRM public routing API
+async function loadRealRoute() {
+  const wp = [
+    { lat: 10.77180, lon: 106.69820 },   // Bến Thành
+    { lat: 10.34600, lon: 107.08400 },   // Vũng Tàu
+  ];   // OSRM routes the real highway (QL51) between the two
+  const coords = wp.map(p => `${p.lon},${p.lat}`).join(";");
+  const r = await fetch(`https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=true`);
+  const j = await r.json();
+  if (!j.code || j.code !== "Ok" || !j.routes || !j.routes.length) throw new Error("OSRM: " + (j.code || "no route"));
+  const r0 = j.routes[0];
+  const geo = r0.geometry.coordinates.map(c => ({ lat: c[1], lon: c[0] }));
+  /* FULL route (raw OSRM geometry — already dense, ~20-40 m in the city, so the
+   * 64-pt batches follow the streets). The sim drives the whole trip; the board
+   * gets it streamed in 64-point batches (sendRouteBatch). */
+  const pts = geo;
+  const steps = [];
+  let acc = 0;
+  for (const st of ((r0.legs && r0.legs[0] && r0.legs[0].steps) || [])) {
+    steps.push({
+      name: st.name || "",
+      modifier: (st.maneuver && st.maneuver.modifier) || "",
+      type: (st.maneuver && st.maneuver.type) || "",
+      distFromStart: acc,
+    });
+    acc += st.distance || 0;
+  }
+  return { pts, km: r0.distance / 1000, steps };
+}
+
+async function loadSampleRoute() {
+  try {
+    const { pts, km, steps } = await loadRealRoute();
+    const xml = buildRouteXml(pts);
+    $("routeXml").value = xml;
+    fullRoutePts = parseRoutePts();   /* keep the sim in sync with the box */
+    routeSteps = (steps && steps.length) ? steps : null;
+    routeStepsXml = routeSteps ? xml : null;
+    log(`sample route: real OSM path — ${pts.length} pts, ${km.toFixed(1)} km, ${routeSteps ? routeSteps.length : 0} turns`, "sys");
+  } catch (e) {
+    $("routeXml").value = sampleRoute();
+    fullRoutePts = parseRoutePts();
+    routeSteps = null; routeStepsXml = null;
+    log("real route failed (" + e.message + ") — using sample", "err");
+  }
+}
+$("btnSample").onclick = () => loadSampleRoute();
+
+/* The board stores at most NAV_MAX_ROUTE_POINTS (64) points, so a long road is
+ * STREAMED to it in 64-point batches. As the car drives, we send the next
+ * window (a little behind the car so there's a short path behind + a long path
+ * ahead), and the sim keeps going over the full route. */
+let fullRoutePts = [];     // the full route the sim drives (all routeXml points)
+let routeBatchStart = -1;  // start index of the batch currently on the board
+
+async function sendRouteBatch(carIdx) {
+  const start = Math.max(0, behindStart(carIdx));   // keep ~560m (half screen height @ z15) behind the car
+  const batch = fullRoutePts.slice(start, start + MAX_ROUTE_PTS);
+  if (batch.length < 2) return;
+  routeBatchStart = start;
+  await sendBytes(encRoute(batch, 15));
+  log(`route batch ${start}..${start + batch.length - 1} / ${fullRoutePts.length} pts`, "sent");
+}
+
 $("btnSendRoute").onclick = async () => {
-  const xml = $("routeXml").value.trim();
-  if (!/<\/route>/.test(xml)) { log("route must end with </route>", "err"); return; }
-  await send(xml);
+  fullRoutePts = parseRoutePts();
+  if (fullRoutePts.length < 2) { log("no route points found in routeXml", "err"); return; }
+  await sendRouteBatch(0);
 };
 
-// ---- maneuver / pos ----
+// ---- maneuver / pos / time / eta ----
+function slAttr() {
+  const v = Math.round(parseFloat($("posLimit").value) || 0);
+  return v > 0 ? ` sl="${v}"` : "";
+}
 $("btnMan").onclick = () =>
-  send(`<nav d="${$("manDist").value}" m="${$("manType").value}" s="${$("manStreet").value}"></nav>`);
+  sendBytes(encNav(+$("manDist").value, $("manType").value, $("manStreet").value));
+$("btnMan2").onclick = () =>
+  sendBytes(encNav2(+$("man2Dist").value, $("man2Type").value, $("man2Street").value));
 $("btnPos").onclick = () =>
-  send(`<pos lat="${$("posLat").value}" lon="${$("posLon").value}" spd="${$("simSpd").value}" hdg="${$("posHdg").value}"></pos>`);
+  sendBytes(encPos(+$("posLat").value, +$("posLon").value, +$("simSpd").value, +$("posHdg").value, +$("posLimit").value));
+$("btnClock").onclick = () =>
+  sendBytes(encClock(+$("clkH").value, +$("clkM").value));
+$("btnEta").onclick = () =>
+  sendBytes(encEta(+$("etaH").value, +$("etaM").value, $("etaA").value));
+$("btnWeather").onclick = () =>
+  sendBytes(encWeather(+$("wxT").value, +$("wxH").value, +$("wxCode").value, $("wxTxt").value));
 
-// ---- simulate: step along the route at 1 Hz ----
+// ---- simulate: drive ALONG the route polyline at a set speed ----
+// Distance along the polyline is interpolated, so the marker glides along the
+// path instead of teleporting between waypoints. Loops at the end.
 let simTimer = null;
+let simState = null;
+let simTickBusy = false;   /* true while a sim tick is still sending packets */
+
 function parseRoutePts() {
   const xml = $("routeXml").value;
   const out = [];
@@ -192,37 +533,243 @@ function parseRoutePts() {
   while ((m = re.exec(xml))) out.push({ lat: parseFloat(m[1]), lon: parseFloat(m[2]) });
   return out;
 }
+
+// haversine meters between two {lat, lon}
+function distMeters(a, b) {
+  const R = 6371000;
+  const dLat = (b.lat - a.lat) * Math.PI / 180;
+  const dLon = (b.lon - a.lon) * Math.PI / 180;
+  const la1 = a.lat * Math.PI / 180, la2 = b.lat * Math.PI / 180;
+  const h = Math.sin(dLat / 2) ** 2 +
+            Math.cos(la1) * Math.cos(la2) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
 function heading(a, b) {
-  const x = Math.cos(a.lat * Math.PI / 180) * Math.sin((b.lon - a.lon) * Math.PI / 180);
-  const y = Math.cos(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) -
-            Math.sin(a.lat * Math.PI / 180) * Math.sin(b.lat * Math.PI / 180) *
-            Math.cos((b.lon - a.lon) * Math.PI / 180);
+  // true bearing from a to b (0=N, 90=E, 180=S, 270=W)
+  const f1 = a.lat * Math.PI / 180, f2 = b.lat * Math.PI / 180;
+  const dl = (b.lon - a.lon) * Math.PI / 180;
+  const x = Math.sin(dl) * Math.cos(f2);
+  const y = Math.cos(f1) * Math.sin(f2) - Math.sin(f1) * Math.cos(f2) * Math.cos(dl);
   return Math.round((Math.atan2(x, y) * 180 / Math.PI + 360) % 360);
 }
-$("btnSim").onclick = async () => {
-  const pts = parseRoutePts();
-  if (pts.length < 2) { log("need a route first (load sample)", "err"); return; }
+
+// precompute cumulative distance at each vertex
+function buildSim(pts) {
+  const seg = [0];
+  let acc = 0;
+  for (let i = 0; i < pts.length - 1; i++) {
+    acc += distMeters(pts[i], pts[i + 1]);
+    seg.push(acc);
+  }
+  return { pts, seg, total: acc };
+}
+
+// index of the polyline segment containing distance `d` (clamped to the end)
+function simIndex(state, d) {
+  const { seg, total } = state;
+  if (d >= total) return state.pts.length - 2;
   let i = 0;
+  while (i < seg.length - 2 && seg[i + 1] < d) i++;
+  return i;
+}
+
+// interpolated position + heading at `d` meters along the polyline (no loop —
+// clamps at the end so the long road drives through to the destination)
+function simAt(state, d) {
+  const { pts, seg, total } = state;
+  if (d >= total) d = total;
+  const i = simIndex(state, d);
+  const a = pts[i], b = pts[i + 1];
+  const t = (d - seg[i]) / Math.max(seg[i + 1] - seg[i], 1e-9);
+  return { lat: a.lat + (b.lat - a.lat) * t,
+           lon: a.lon + (b.lon - a.lon) * t,
+           hdg: heading(a, b) };
+}
+
+// ---- next-turn + speed simulation ----
+let routeSteps = null;      // [{name, modifier, type, distFromStart}] from OSRM
+let routeStepsXml = null;   // the exact <route> XML these steps belong to
+
+function mapModifier(mod, type) {
+  if (type === "arrive") return "arrive";
+  if (type === "roundabout" || type === "rotary") return "roundabout";
+  switch (mod) {
+    case "left":         return "left";
+    case "right":        return "right";
+    case "slight left":  return "slight-left";
+    case "slight right": return "slight-right";
+    case "uturn":        return "u-turn";
+    default:             return "straight";
+  }
+}
+
+// next N maneuvers for the vehicle at `travelled` meters (OSRM steps when
+// available, else turn-angle detection on the polyline). Returns up to maxN.
+function nextManeuvers(state, travelled, maxN = 2) {
+  const out = [];
+  if (routeSteps && routeSteps.length && routeStepsXml === $("routeXml").value) {
+    for (const s of routeSteps) {
+      if (s.distFromStart > travelled + 3) {
+        out.push({ d: Math.max(0, Math.round(s.distFromStart - travelled)),
+                   m: mapModifier(s.modifier, s.type), s: s.name || "" });
+        if (out.length >= maxN) break;
+      }
+    }
+    if (!out.length) out.push({ d: Math.max(0, Math.round(state.total - travelled)), m: "arrive", s: "" });
+    return out;
+  }
+  // fallback: detect turns from the polyline geometry
+  const { pts, seg, total } = state;
+  let i = 0;
+  while (i < seg.length - 2 && seg[i + 1] < travelled) i++;
+  let curH = heading(pts[i], pts[i + 1]);
+  for (let j = i + 1; j < pts.length - 1; j++) {
+    const h = heading(pts[j], pts[j + 1]);
+    const dH = ((h - curH + 540) % 360) - 180;          // signed turn angle
+    if (Math.abs(dH) > 22) {
+      const m = (Math.abs(dH) > 100) ? "u-turn"
+              : (Math.abs(dH) > 50) ? (dH < 0 ? "left" : "right")
+              : (dH < 0 ? "slight-left" : "slight-right");
+      out.push({ d: Math.max(0, Math.round(seg[j + 1] - travelled)), m, s: "" });
+      if (out.length >= maxN) break;
+    }
+    curH = h;
+  }
+  if (!out.length) out.push({ d: Math.max(0, Math.round(total - travelled)), m: "arrive", s: "" });
+  return out;
+}
+function nextManeuver(state, travelled) { return nextManeuvers(state, travelled, 1)[0]; }
+
+// DEMO MODE: constant speed — ignore real-world braking near turns / at
+// arrival so the car glides at a perfectly uniform rate (smoothest demo).
+function simSpeed(nav, base) {
+  return base;
+}
+
+function startSim(spd, mult) {
+  if (simTimer) return;                       // already driving
+  const effKmh = spd * mult;
+  /* live clock/ETA: clock advances with real (drive) time from the entered
+   * base; ETA = current clock + remaining drive time at the effective speed */
+  const simStartMs = Date.now();
+  const baseClockMin = ((+$("clkH").value * 60) + (+$("clkM").value)) % (24 * 60);
+  let travelled = 0;
+  let tickCount = 0;
+  let lastNav = null, lastNav2 = null;   /* for change-only BLE sends */
+  let lastMinKey = -1;                   /* clock/ETA sent once per minute */
   $("btnSim").disabled = true; $("btnStopSim").disabled = false;
-  log(`simulate: ${pts.length} pts @ ${$("simSpd").value} km/h`, "sys");
+  log(`simulate: ${fullRoutePts.length} pts, ${simState.total.toFixed(0)} m route @ ${spd} km/h ×${mult} (batched to the board)`, "sys");
+  const TICK = 100;   // ms — ~10 pos packets/s. Lower than before so the BLE
+                      // + board redraw load stays well under the "stalls core
+                      // 0's BLE controller" limit; the board interpolates +
+                      // extrapolates so it still looks smooth.
   simTimer = setInterval(async () => {
-    const a = pts[i % pts.length];
-    const b = pts[(i + 1) % pts.length];
-    await send(`<pos lat="${a.lat.toFixed(6)}" lon="${a.lon.toFixed(6)}" spd="${$("simSpd").value}" hdg="${heading(a, b)}"></pos>`);
-    $("posLat").value = a.lat.toFixed(5);
-    $("posLon").value = a.lon.toFixed(5);
-    $("posHdg").value = heading(a, b);
-    i++;
-  }, 1000);
+    if (simTickBusy) return;             // previous tick still sending -> skip (no pile-up)
+    simTickBusy = true;
+    try {
+      travelled += effKmh / 3.6 * (TICK / 1000);   // meters per tick
+      if (travelled >= simState.total) {           // reached the end of the long road
+        clearInterval(simTimer); simTimer = null;
+        $("btnSim").disabled = false; $("btnStopSim").disabled = true;
+        log(`arrived — drove ${simState.total.toFixed(0)} m`, "sys");
+        return;
+      }
+      const p = simAt(simState, travelled);
+      /* stream the next 256-pt batch before the car runs past the current window */
+      const carIdx = simIndex(simState, travelled);
+      if (carIdx - routeBatchStart > MAX_ROUTE_PTS - 24) await sendRouteBatch(carIdx);
+      const navs = nextManeuvers(simState, travelled, 2); // next + next-next
+      const nav = navs[0], nav2 = navs[1] || nav;
+      const spdNow = simSpeed(nav, spd);               // varies near turns
+      /* BLE rate: don't resend identical packets every tick. NAV/NAV2 go out
+       * only when they change (or every 1s to refresh the countdown), and the
+       * clock/ETA only when the displayed minute changes — cuts the steady
+       * write rate from ~30/s to ~10/s (just POS), so the board's BLE
+       * controller isn't hammered. */
+      const navChanged = !lastNav || lastNav.m !== nav.m || lastNav.s !== nav.s ||
+                         Math.abs((lastNav.d || 0) - nav.d) > 25;
+      const nav2Changed = !lastNav2 || lastNav2.m !== nav2.m || lastNav2.s !== nav2.s ||
+                          Math.abs((lastNav2.d || 0) - nav2.d) > 25;
+      lastNav = nav; lastNav2 = nav2;
+      if ((++tickCount % 10) === 0 || navChanged)  await sendBytes(encNav(nav.d, nav.m, nav.s));
+      if ((tickCount % 10) === 0 || nav2Changed)   await sendBytes(encNav2(nav2.d, nav2.m, nav2.s));
+      /* clock + ETA: send once per displayed minute, not every second */
+      const elMin = (Date.now() - simStartMs) / 60000;
+      const curMin = Math.floor((baseClockMin + elMin) % (24 * 60));
+      const remSec = Math.max(0, (simState.total - travelled) / (effKmh / 3.6));
+      const etaMin = Math.floor((curMin + remSec / 60) % (24 * 60));
+      const ch = Math.floor(curMin / 60), cm = Math.floor(curMin % 60);
+      const eh = Math.floor(etaMin / 60), em = Math.floor(etaMin % 60);
+      const minKey = curMin * 100 + etaMin;
+      if (minKey !== lastMinKey) {
+        lastMinKey = minKey;
+        await sendBytes(encClock(ch, cm));
+        await sendBytes(encEta(eh, em, $("etaA").value));
+        $("clkH").value = ch; $("clkM").value = cm;
+        $("etaH").value = eh; $("etaM").value = em;
+      }
+      await sendBytes(encPos(p.lat, p.lon, spdNow, p.hdg, +$("posLimit").value));
+      $("posLat").value = p.lat.toFixed(5);
+      $("posLon").value = p.lon.toFixed(5);
+      $("posHdg").value = p.hdg;
+    } finally {
+      simTickBusy = false;
+    }
+  }, TICK);
+}
+
+/* ONE-CLICK NAVIGATION: connect (if needed) + send EVERY packet the board
+ * needs (route batch + position at the route start + first next-turn nav +
+ * clock + ETA), then start driving the full route. */
+async function startNavigation() {
+  if (!(await connectNav())) return;
+  fullRoutePts = parseRoutePts();
+  if (fullRoutePts.length < 2) {
+    log("route box empty — loading sample first", "sys");
+    await loadSampleRoute();
+    fullRoutePts = parseRoutePts();
+  }
+  if (fullRoutePts.length < 2) { log("still no route — cannot navigate", "err"); return; }
+  simState = buildSim(fullRoutePts);
+  const spd = Math.max(0, parseFloat($("simSpd").value) || 0);
+  const mult = Math.max(1, parseFloat($("simMult").value) || 1);
+  /* 1) route window · 2) pos at route start · 3) nav (first turn) · 4) clock + ETA */
+  await sendRouteBatch(0);
+  const start = simAt(simState, 0);
+  await sendBytes(encPos(start.lat, start.lon, spd, start.hdg, +$("posLimit").value));
+  const navs = nextManeuvers(simState, 0, 2);
+  await sendBytes(encNav(navs[0].d, navs[0].m, navs[0].s));
+  await sendBytes(encNav2((navs[1] || navs[0]).d, (navs[1] || navs[0]).m, (navs[1] || navs[0]).s));
+  await sendBytes(encClock(+$("clkH").value, +$("clkM").value));
+  await sendBytes(encEta(+$("etaH").value, +$("etaM").value, $("etaA").value));
+  await sendBytes(encWeather(+$("wxT").value, +$("wxH").value, +$("wxCode").value, $("wxTxt").value));
+  $("posLat").value = start.lat.toFixed(5);
+  $("posLon").value = start.lon.toFixed(5);
+  $("posHdg").value = start.hdg;
+  log(`navigation: route + pos(${start.lat.toFixed(5)},${start.lon.toFixed(5)}) + nav + time + ETA sent — driving`, "sys");
+  startSim(spd, mult);
+}
+$("btnNavAll").onclick = () => startNavigation();
+
+$("btnSim").onclick = async () => {
+  fullRoutePts = parseRoutePts();   /* always drive whatever is in the route box */
+  if (fullRoutePts.length < 2) { log("need a route first (load sample)", "err"); return; }
+  simState = buildSim(fullRoutePts);
+  const spd = Math.max(0, parseFloat($("simSpd").value) || 0);
+  const mult = Math.max(1, parseFloat($("simMult").value) || 1);
+  await sendRouteBatch(0);   /* make sure the board has the first window */
+  startSim(spd, mult);
 };
 $("btnStopSim").onclick = () => {
-  clearInterval(simTimer); simTimer = null;
+  clearInterval(simTimer); simTimer = null; simState = null;
   $("btnSim").disabled = false; $("btnStopSim").disabled = true;
   log("simulate stopped", "sys");
 };
 
 // ---- init ----
-$("routeXml").value = sampleRoute();
+$("routeXml").value = sampleRoute();   // show something immediately
+loadSampleRoute();                     // replace with a real OSM path when ready
 log("ready — connect to NAV-OSM, then send a route and simulate a drive", "sys");
 </script>
 </body>

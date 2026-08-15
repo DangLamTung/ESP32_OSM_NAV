@@ -20,7 +20,7 @@ bool display_panel_init(void)
         return false;
     }
     display.setRotation(1);          /* landscape 320x240 */
-    display.setBrightness(255);      /* backlight on (BL=45, active high) */
+    display.setBrightness(BRIGHTNESS_DEFAULT);   /* default backlight = half */
     ESP_LOGI(TAG, "display ready 320x240");
     return true;
 }
@@ -34,7 +34,7 @@ void display_panel_sleep(void)
 void display_panel_wake(void)
 {
     display.wakeup();                /* 0x11 */
-    display.setBrightness(255);
+    display.setBrightness(BRIGHTNESS_DEFAULT);
 }
 
 /* ---- software I2C master to the FT6336 ----

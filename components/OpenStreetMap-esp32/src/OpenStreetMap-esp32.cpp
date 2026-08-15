@@ -424,7 +424,12 @@ bool OpenStreetMap::composeMap(LGFX_Sprite &mapSprite, TileBufferList &tilePoint
     }
 
     mapSprite.setTextColor(TFT_WHITE, OSM_BGCOLOR);
+    /* Attribution banner: draw at 0.7x so it stays legal but doesn't dominate
+     * the corner (9px DejaVu -> ~6px). Text size is reset right after so the
+     * nav overlay drawn later on mapSprite is unaffected. */
+    mapSprite.setTextSize(0.7f);
     mapSprite.drawRightString(currentProvider->attribution, mapSprite.width(), mapSprite.height() - 10, &DejaVu9Modded);
+    mapSprite.setTextSize(1.0f);
     mapSprite.setTextColor(TFT_WHITE, TFT_BLACK);
     return true;
 }
@@ -482,13 +487,38 @@ bool OpenStreetMap::fetchMap(LGFX_Sprite &mapSprite, double longitude, double la
     return true;
 }
 
+void OpenStreetMap::prefetchTiles(double longitude, double latitude, uint8_t zoom)
+{
+    if (!tasksStarted && !startTileWorkerTasks())
+        return;
+    if (zoom < currentProvider->minZoom || zoom > currentProvider->maxZoom)
+        return;
+    if (!mapWidth || !mapHeight)
+        return;
+    if (!tilesCache.capacity() && !resizeTilesCache(tilesNeeded(mapWidth, mapHeight)))
+        return;
+
+    constexpr double MAX_MERCATOR_LAT = 85.0;
+    longitude = fmod(longitude + 180.0, 360.0) - 180.0;
+    latitude = std::clamp(latitude, -MAX_MERCATOR_LAT, MAX_MERCATOR_LAT);
+
+    tileList requiredTiles;
+    computeRequiredTiles(longitude, latitude, zoom, requiredTiles);
+    if (tilesCache.capacity() < requiredTiles.size())
+        return;
+
+    mapTimeoutMS = 0;   /* no timeout on the background warm-up */
+    TileBufferList tilePointers;
+    updateCache(requiredTiles, zoom, tilePointers);   /* loads into cache, no compose */
+}
+
 void OpenStreetMap::PNGDraw(PNGDRAW *pDraw)
 {
     uint16_t *destRow = currentInstance->currentTileBuffer + (pDraw->y * currentInstance->currentProvider->tileSize);
     getPNGCurrentCore()->getLineAsRGB565(pDraw, destRow, PNG_RGB565_BIG_ENDIAN, 0xffffffff);
 }
 
-bool OpenStreetMap::fetchTile(ReusableTileFetcher &fetcher, CachedTile &tile, uint32_t x, uint32_t y, uint8_t zoom, String &result, unsigned long timeout)
+bool OpenStreetMap::fetchTile(ReusableTileFetcher *fetcher, CachedTile &tile, uint32_t x, uint32_t y, uint8_t zoom, String &result, unsigned long timeout)
 {
     /* Tile source per mode: AUTO = SD first then network; SD_ONLY = SD only;
      * NET_ONLY = network only. */
@@ -523,6 +553,11 @@ bool OpenStreetMap::fetchTile(ReusableTileFetcher &fetcher, CachedTile &tile, ui
     }
     else
     {
+        if (!fetcher)
+        {
+            result = "network fetch unavailable (SD-only mode)";
+            return false;
+        }
         if (currentProvider->requiresApiKey)
         {
             snprintf(url, sizeof(url),
@@ -536,7 +571,7 @@ bool OpenStreetMap::fetchTile(ReusableTileFetcher &fetcher, CachedTile &tile, ui
                      zoom, x, y);
         }
 
-        buffer = fetcher.fetchToBuffer(url, result, timeout);
+        buffer = fetcher->fetchToBuffer(url, result, timeout);
         if (!buffer.isAllocated())
             return false;
     }
@@ -576,7 +611,11 @@ bool OpenStreetMap::fetchTile(ReusableTileFetcher &fetcher, CachedTile &tile, ui
 
 void OpenStreetMap::tileFetcherTask(void *param)
 {
-    ReusableTileFetcher fetcher;
+    /* TLS/network fetcher built LAZILY — constructing it eagerly pulls in
+     * mbedTLS/AES hw init (WiFiClientSecure) which crashes on WiFi-less builds
+     * (esp_intr_alloc: AES source has no descriptor). SD-only mode never needs
+     * it, so we only allocate it if a network job could arrive. */
+    ReusableTileFetcher *fetcher = nullptr;
     OpenStreetMap *osm = static_cast<OpenStreetMap *>(param);
     while (true)
     {
@@ -612,6 +651,8 @@ void OpenStreetMap::tileFetcherTask(void *param)
         }
 
         String result;
+        if (!fetcher && osm->tileMode != OpenStreetMap::TILE_SD_ONLY)
+            fetcher = new ReusableTileFetcher();
         if (!osm->fetchTile(fetcher, *job.tile, job.x, job.y, job.z, result, remainingMS))
         {
             log_e("Tile fetch failed: %s", result.c_str());

@@ -20,6 +20,8 @@ idf_component_register(
         "power/power_mgr.cpp"
         "ble/ble_nav.cpp"
         "ble/ble_scan.cpp"
+        "gps/gps_ublox.c"
+        "net/wifi_net.cpp"
         "sd/sd_card.c"
         "sd/sd_upload.c"
     INCLUDE_DIRS
@@ -30,6 +32,8 @@ idf_component_register(
         "input"
         "power"
         "ble"
+        "gps"
+        "net"
         "sd"
     REQUIRES
         espressif__arduino-esp32
