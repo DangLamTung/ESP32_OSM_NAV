@@ -11,16 +11,18 @@ Board: **2.8" IPS ESP32-S3 + ILI9341** (ES3C28P / ES3N28P).
 
 **Offline A\* routing on device**
 
-<video src="videos/astar-routing.mp4" controls muted width="480"></video>
+<video src="videos/astar-routing.mp4" controls muted width="480" poster="videos/astar-routing-poster.png"></video>
 
-- Local clip: [`videos/astar-routing.mp4`](videos/astar-routing.mp4)
+[![Play A* routing demo](videos/astar-routing-poster.png)](videos/astar-routing.mp4)
+
 - YouTube: https://youtube.com/shorts/pddq8PctX3E
 
 **BLE navigation (drive simulation)**
 
-<video src="videos/ble-navigation.mp4" controls muted width="480"></video>
+<video src="videos/ble-navigation.mp4" controls muted width="480" poster="videos/ble-navigation-poster.png"></video>
 
-- Local clip: [`videos/ble-navigation.mp4`](videos/ble-navigation.mp4)
+[![Play BLE navigation demo](videos/ble-navigation-poster.png)](videos/ble-navigation.mp4)
+
 - YouTube: https://youtube.com/shorts/bZp_f6lPf84
 
 ## Hardware
