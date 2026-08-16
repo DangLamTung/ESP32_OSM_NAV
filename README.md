@@ -86,10 +86,74 @@ is flaky; retry the flash if it fails transiently. `car_nav.bin` is ~1.8 MB
 ## SD card contents
 
 ```
-/sdcard/tiles/z11..z15/  <z>/<x>/<y>.png     offline map tiles
-/sdcard/routing.rng                            whole-Vietnam routing graph (120 MB RNG2)
-/sdcard/config.txt                             offline_route=0/1 (UI setting)
+/sdcard/<z>/<x>/<y>.png|jpg    offline map tiles (standard slippy z/x/y layout)
+/sdcard/routing.rng            whole-Vietnam routing graph (120 MB RNG2)
+/sdcard/config.txt             offline_route=0/1 (UI setting)
 ```
+
+## Offline map tiles (SD)
+
+The firmware reads tiles from `/sdcard/<z>/<x>/<y>.png` (falls back to `.jpg`).
+For the default Bến Thành view you want **z11–z15** (the app's offline range);
+z16 and far areas fall back to WiFi when connected. Card must be **FAT32**.
+
+**1. Estimate how much you need (optional)**
+
+```bash
+python3 scripts/estimate_area.py --bbox 106.36,10.35,106.92,11.12 --min-zoom 11 --max-zoom 15
+```
+
+**2. Download tiles**
+
+```bash
+python3 scripts/download_offline_tiles.py \
+  --center-lat 10.7718 --center-lon 106.6982 \
+  --min-zoom 11 --max-zoom 15 --radius-km 5 \
+  --out tiles_hcmc --threads 6
+```
+
+- Produces `tiles_hcmc/<z>/<x>/<y>.png` from `tile.openstreetmap.org`.
+- Keep `--radius-km` small and `--threads` low: OSM's tile policy is for light,
+  personal use. The script sends a descriptive User-Agent and refuses to save
+  OSM's "access blocked" placeholder. Alternatives are noted in its header
+  (e.g. Carto Voyager: `https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png`).
+
+**3. Shrink to JPEG (optional — ~3× smaller, more tiles per card)**
+
+```bash
+python3 scripts/convert_png_to_jpg.py --dir tiles_hcmc --quality 80
+```
+
+Writes `z/x/y.jpg` beside each PNG and deletes the PNG by default. The firmware
+tries `.png` first, then `.jpg`, so either works.
+
+**4. Get them onto the SD card**
+
+- **Card reader (recommended)** — copy the `z/` folders onto the SD root:
+  ```
+  /sdcard/11/<x>/<y>.png
+  /sdcard/12/<x>/<y>.png
+  ...
+  ```
+- **Over USB (no card removal)** — with the board in SD reader mode
+  (`src/sd_upload.c`):
+  ```bash
+  python3 scripts/upload_tiles_serial.py --port /dev/cu.usbmodem101 --dir tiles_hcmc
+  ```
+  ⚠️ The board's native USB-Serial/JTAG drops bytes on bursts — if tiles come
+  back missing/corrupt, use the card reader instead.
+
+**5. Verify**
+
+```bash
+find tiles_hcmc -name '*.png' | wc -l     # count tiles you downloaded
+# on the board: zoom/pan the area — tiles should pop in from SD with no WiFi
+```
+
+**Embedded fallback (no SD, no WiFi):** a tiny set of z16 Bến Thành tiles can be
+baked into the firmware as JPEG via `scripts/fetch_tiles_embed.py` →
+`scripts/gen_embedded_tiles.py` → `src/map_tiles.h` (decoded by tjpgd). It's
+only ~4 tiles — a boot fallback, not a replacement for SD coverage.
 
 ## BLE protocol (phone → board)
 
