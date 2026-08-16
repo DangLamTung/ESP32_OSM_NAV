@@ -22,6 +22,8 @@
 # OS / editor
 .DS_Store
 Thumbs.db
+# local VS Code workspace config (machine-specific tasks/settings) — keep out
+.vscode/
 # clangd / editor index cache (was accidentally committed once — keep out)
 .cache/
 # stray background logs
