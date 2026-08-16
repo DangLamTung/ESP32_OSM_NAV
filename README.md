@@ -93,6 +93,12 @@ is flaky; retry the flash if it fails transiently. `car_nav.bin` is ~1.8 MB
 
 ## Offline map tiles (SD)
 
+> **Want a big map (e.g. all of Vietnam) or your own tile server?** See
+> [`scripts/README.md`](scripts/README.md) — it covers running a local
+> `overv/openstreetmap-tile-server` in WSL2 and downloading large areas
+> (whole-Vietnam z15 ≈ 962k tiles) without tripping OSM's bulk-download
+> protection. The quick path for a small area around Bến Thành is below.
+
 The firmware reads tiles from `/sdcard/<z>/<x>/<y>.png` (falls back to `.jpg`).
 For the default Bến Thành view you want **z11–z15** (the app's offline range);
 z16 and far areas fall back to WiFi when connected. Card must be **FAT32**.
