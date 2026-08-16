@@ -7,6 +7,12 @@ road graph loaded from SD.
 
 Board: **2.8" IPS ESP32-S3 + ILI9341** (ES3C28P / ES3N28P).
 
+## Demos
+
+- **Offline A\* routing on device**
+  [![Offline A\* routing on device](https://youtube.com)](https://youtube.com/shorts/pddq8PctX3E)
+- **BLE navigation (drive simulation)**
+  [![BLE navigation (drive simulation)](https://youtube.com)](https://youtube.com/shorts/bZp_f6lPf84)
 ## Hardware
 
 - ESP32-S3, 240 MHz, **16 MB flash, 8 MB octal PSRAM**
@@ -156,7 +162,3 @@ Say you drive **2 h/day** and sleep the other **22 h**:
 - ✅ GPS (U-Blox NMEA) broadcast over BLE
 - ✅ Perf logging (avg ms/fps per frame stage on serial)
 
-## Demos
-
-- **Offline A\* routing on device** — https://youtube.com/shorts/pddq8PctX3E
-- **BLE navigation (drive simulation)** — https://youtube.com/shorts/bZp_f6lPf84
