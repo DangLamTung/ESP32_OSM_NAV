@@ -1,6 +1,7 @@
 // test_sim.js — verify the web_ble_nav path-following simulation math.
 const fs = require("fs");
-const html = fs.readFileSync("/tmp/ESP32_OSM_NAV/web_ble_nav/index.html", "utf8");
+const path = require("path");
+const html = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
 const js = html.slice(html.indexOf("<script>") + 8, html.lastIndexOf("</script>"));
 
 // Minimal DOM/console stubs so the page's script evaluates without errors.
