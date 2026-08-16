@@ -29,7 +29,7 @@ browser (this app)  --BLE-->  ESP32-S3 board (car_nav.bin, offline SD tiles)
 ## 1. Run the web simulator
 
 ```bash
-cd /Users/tungdl/Documents/Eink/ESP32_OSM_NAV/web_ble_nav
+cd ../ESP32_OSM_NAV/web_ble_nav
 python3 -m http.server 8000
 ```
 
