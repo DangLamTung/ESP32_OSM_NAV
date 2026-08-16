@@ -22,6 +22,10 @@
 # OS / editor
 .DS_Store
 Thumbs.db
+# clangd / editor index cache (was accidentally committed once — keep out)
+.cache/
+# stray background logs
+nohup.out
 
 # large routing graph binaries (rebuilt via tools/)
 tools/graphs/*.rng

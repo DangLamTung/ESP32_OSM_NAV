@@ -9,9 +9,9 @@ Board: **2.8" IPS ESP32-S3 + ILI9341** (ES3C28P / ES3N28P).
 
 ## Demos
 
-- **Offline A* routing on device**
+- **Offline A* routing on device** — [video](videos/astar-routing.mp4) ·
   [![Offline A* routing on device](https://youtube.com)](https://youtube.com/shorts/pddq8PctX3E)
-- **BLE navigation (drive simulation)**
+- **BLE navigation (drive simulation)** — [video](videos/ble-navigation.mp4) ·
   [![BLE navigation (drive simulation)](https://youtube.com)](https://youtube.com/shorts/bZp_f6lPf84)
 
 ## Hardware
@@ -162,4 +162,3 @@ Say you drive **2 h/day** and sleep the other **22 h**:
 - ✅ FT6336 touch gestures; long-press deep sleep; brightness slider
 - ✅ GPS (U-Blox NMEA) broadcast over BLE
 - ✅ Perf logging (avg ms/fps per frame stage on serial)
-

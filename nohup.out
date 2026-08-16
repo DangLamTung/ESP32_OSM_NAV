@@ -1,1 +1,0 @@
-sh: line 1: 30723 Alarm clock: 14         perl -e 'alarm 120; exec @ARGV' cat /dev/cu.usbmodem3101 > /tmp/board_console.log 2>&1
